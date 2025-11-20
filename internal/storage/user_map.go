@@ -171,11 +171,6 @@ func (s *UserMapStore) GetMapping(sourcePlatform, sourceUserID, targetPlatform s
 	s.RUnlock()
 
 	if err != nil {
-		s.logger.Debug("storage", "User mapping not found", map[string]interface{}{
-			"source_platform": sourcePlatform,
-			"source_user_id":  sourceUserID,
-			"target_platform": targetPlatform,
-		})
 		return nil, false
 	}
 

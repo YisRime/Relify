@@ -30,8 +30,8 @@ func NewBaseStore(dbPath string, log *logger.Logger) (*BaseStore, error) {
 	}
 
 	// 设置连接池参数以提高并发性能
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(2)
 
 	if log == nil {
 		log = logger.GetGlobal()

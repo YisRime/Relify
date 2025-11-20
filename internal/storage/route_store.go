@@ -241,11 +241,11 @@ func (s *RouteStore) containsBinding(list []string, id string) bool {
 }
 
 func (s *RouteStore) removeBinding(list []string, id string) []string {
-	result := make([]string, 0, len(list))
-	for _, item := range list {
-		if item != id {
-			result = append(result, item)
+	for i, item := range list {
+		if item == id {
+			list[i] = list[len(list)-1]
+			return list[:len(list)-1]
 		}
 	}
-	return result
+	return list
 }

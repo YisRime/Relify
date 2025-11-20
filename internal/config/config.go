@@ -79,16 +79,17 @@ func setDefaults(cfg *Config) {
 
 // Validate 验证配置
 func (c *Config) Validate() error {
-	validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
-	if !validLevels[c.LogLevel] {
+	validLevels := map[string]struct{}{"debug": {}, "info": {}, "warn": {}, "error": {}}
+	if _, ok := validLevels[c.LogLevel]; !ok {
 		return fmt.Errorf("invalid log level: %s", c.LogLevel)
 	}
 
-	validModes := map[string]bool{"peer": true, "hub": true}
 	if c.Mode == "" {
 		return fmt.Errorf("mode must be specified: 'peer' or 'hub'")
 	}
-	if !validModes[c.Mode] {
+
+	validModes := map[string]struct{}{"peer": {}, "hub": {}}
+	if _, ok := validModes[c.Mode]; !ok {
 		return fmt.Errorf("invalid mode: %s (must be 'peer' or 'hub')", c.Mode)
 	}
 

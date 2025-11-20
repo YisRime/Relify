@@ -15,6 +15,11 @@ import (
 	"Relify/internal/logger"
 )
 
+const (
+	shutdownTimeout = 30 * time.Second
+	signalBuffer    = 1
+)
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
 	flag.Parse()
@@ -62,13 +67,13 @@ func main() {
 	logger.Info("main", "Relify started successfully")
 	logger.Info("main", "Press Ctrl+C to stop")
 
-	sigChan := make(chan os.Signal, 1)
+	sigChan := make(chan os.Signal, signalBuffer)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
 
 	logger.Info("main", "Shutting down...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
 	if err := coreInst.Stop(shutdownCtx); err != nil {

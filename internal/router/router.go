@@ -72,7 +72,7 @@ func (r *Router) HandleMessage(ctx context.Context, event *model.MessageEvent) e
 	}
 
 	if msg.Fingerprint == "" {
-		msg.Fingerprint = r.generateFingerprint(msg)
+		msg.Fingerprint = fmt.Sprintf("%s:%s:%s:%d", msg.SourcePlatform, msg.SourceRoomID, msg.SourceMsgID, msg.Timestamp.UnixNano())
 	}
 
 	bindings := r.routeStore.GetBindingsByRoom(msg.SourcePlatform, msg.SourceRoomID)
@@ -194,9 +194,4 @@ func (r *Router) sendMessageAsync(ctx context.Context, targetPlatform model.Plat
 			"error":    err.Error(),
 		})
 	}
-}
-
-// generateFingerprint 生成消息指纹
-func (r *Router) generateFingerprint(msg *model.Message) string {
-	return fmt.Sprintf("%s:%s:%s:%d", msg.SourcePlatform, msg.SourceRoomID, msg.SourceMsgID, msg.Timestamp.UnixNano())
 }

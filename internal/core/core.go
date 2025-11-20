@@ -47,8 +47,8 @@ func NewCore(cfg *Config) (*Core, error) {
 
 	userMapStore, err := storage.NewUserMapStore(cfg.DatabasePath, log)
 	if err != nil {
-		routeStore.Close()
 		messageMapStore.Close()
+		routeStore.Close()
 		return nil, fmt.Errorf("initialize user map store: %w", err)
 	}
 
@@ -125,16 +125,21 @@ func (c *Core) Stop(ctx context.Context) error {
 		}
 	}
 
-	if err := c.routeStore.Close(); err != nil {
-		return fmt.Errorf("close route store: %w", err)
+	// 确保所有存储都被关闭，即使某个失败
+	var closeErr error
+	if err := c.userMapStore.Close(); err != nil {
+		c.logger.Error("core", "Failed to close user map store", map[string]interface{}{"error": err.Error()})
+		closeErr = err
 	}
 	if err := c.messageMapStore.Close(); err != nil {
-		return fmt.Errorf("close message map store: %w", err)
+		c.logger.Error("core", "Failed to close message map store", map[string]interface{}{"error": err.Error()})
+		closeErr = err
 	}
-	if err := c.userMapStore.Close(); err != nil {
-		return fmt.Errorf("close user map store: %w", err)
+	if err := c.routeStore.Close(); err != nil {
+		c.logger.Error("core", "Failed to close route store", map[string]interface{}{"error": err.Error()})
+		closeErr = err
 	}
 
 	c.logger.Info("core", "Relify stopped")
-	return nil
+	return closeErr
 }

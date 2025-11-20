@@ -246,7 +246,14 @@ func (s *SubLogger) mergeFields(extraFields ...map[string]interface{}) map[strin
 }
 
 // Global 全局日志记录器实例
-var global *Logger = New(InfoLevel, JSONFormat, os.Stdout)
+var (
+	global     *Logger
+	globalOnce sync.Once
+)
+
+func initGlobal() {
+	global = New(InfoLevel, JSONFormat, os.Stdout)
+}
 
 // SetGlobal 设置全局日志记录器
 func SetGlobal(logger *Logger) {
@@ -255,6 +262,7 @@ func SetGlobal(logger *Logger) {
 
 // GetGlobal 获取全局日志记录器
 func GetGlobal() *Logger {
+	globalOnce.Do(initGlobal)
 	return global
 }
 

@@ -101,19 +101,9 @@ func (s *MessageMapStore) GetTargetID(sourcePlatform, sourceMsgID, targetPlatfor
 }
 
 // GetAllTargets 获取一条消息在所有目标平台的映射 ID
-// 参数：
-//   - sourcePlatform: 来源平台名称
-//   - sourceMsgID: 来源消息 ID
-//
-// 返回：
-//   - []MessageMapping: 所有映射关系列表
-//   - error: 错误信息
 func (s *MessageMapStore) GetAllTargets(sourcePlatform, sourceMsgID string) ([]MessageMapping, error) {
-	query := `
-		SELECT source_platform, source_msg_id, target_platform, target_msg_id, created_at
-		FROM message_mappings
-		WHERE source_platform = ? AND source_msg_id = ?
-	`
+	query := `SELECT source_platform, source_msg_id, target_platform, target_msg_id, created_at
+		FROM message_mappings WHERE source_platform = ? AND source_msg_id = ?`
 
 	s.RLock()
 	rows, err := s.DB().Query(query, sourcePlatform, sourceMsgID)
@@ -129,14 +119,12 @@ func (s *MessageMapStore) GetAllTargets(sourcePlatform, sourceMsgID string) ([]M
 	}
 	defer rows.Close()
 
-	mappings := make([]MessageMapping, 0, 4) // 预分配容量，一般不会超过4个目标平台
+	var mappings []MessageMapping
 	for rows.Next() {
 		var m MessageMapping
 		var createdAt int64
 		if err := rows.Scan(&m.SourcePlatform, &m.SourceMsgID, &m.TargetPlatform, &m.TargetMsgID, &createdAt); err != nil {
-			s.logger.Error("storage", "Failed to scan message mapping", map[string]interface{}{
-				"error": err.Error(),
-			})
+			s.logger.Error("storage", "Failed to scan message mapping", map[string]interface{}{"error": err.Error()})
 			return nil, err
 		}
 		m.CreatedAt = time.Unix(createdAt, 0)
