@@ -1,189 +1,186 @@
 // Package router 提供消息路由引擎
-// 负责消息分发、ID 翻译、提及转换等核心路由逻辑
 package router
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
-	"Relify/internal/driver"
+	"Relify/internal/config"
 	"Relify/internal/logger"
 	"Relify/internal/model"
 	"Relify/internal/storage"
 )
 
-// Router 路由引擎（核心层主逻辑）
+// Router 路由引擎
 type Router struct {
-	driverRegistry  *driver.Registry
-	routeStore      *storage.RouteStore
-	messageMapStore *storage.MessageMapStore
-	userMapStore    *storage.UserMapStore
-	logger          *logger.Logger
+	platformRegistry *model.PlatformRegistry
+	routeStore       *storage.RouteStore
+	messageMapStore  *storage.MessageMapStore
+	userMapStore     *storage.UserMapStore
+	logger           *logger.Logger
+	mode             string
+	hubPlatform      string
+	platformConfigs  map[string]config.RouteType
+	mu               sync.RWMutex
 }
 
-// NewRouter 创建路由引擎实例
-// 参数：
-//   - driverRegistry: 驱动注册表
-//   - routeStore: 路由存储
-//   - messageMapStore: 消息映射存储
-//   - userMapStore: 用户映射存储
-//   - log: 日志记录器
-//
-// 返回：
-//   - *Router: 路由引擎实例
+// NewRouter 创建路由引擎
 func NewRouter(
-	driverRegistry *driver.Registry,
+	platformRegistry *model.PlatformRegistry,
 	routeStore *storage.RouteStore,
 	messageMapStore *storage.MessageMapStore,
 	userMapStore *storage.UserMapStore,
+	mode string,
+	hubPlatform string,
+	platformConfigs map[string]config.RouteType,
 	log *logger.Logger,
 ) *Router {
 	return &Router{
-		driverRegistry:  driverRegistry,
-		routeStore:      routeStore,
-		messageMapStore: messageMapStore,
-		userMapStore:    userMapStore,
-		logger:          log,
+		platformRegistry: platformRegistry,
+		routeStore:       routeStore,
+		messageMapStore:  messageMapStore,
+		userMapStore:     userMapStore,
+		logger:           log,
+		mode:             mode,
+		hubPlatform:      hubPlatform,
+		platformConfigs:  platformConfigs,
 	}
 }
 
-// HandleMessage 处理入站消息（实现 InboundHandler 接口）
+// UpdatePlatformRouteType 更新平台路由类型
+func (r *Router) UpdatePlatformRouteType(platformName string, routeType config.RouteType) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.platformConfigs[platformName] = routeType
+	r.logger.Info("router", "Platform route type updated", map[string]interface{}{
+		"platform":   platformName,
+		"route_type": routeType,
+	})
+}
+
+// HandleMessage 处理入站消息
 func (r *Router) HandleMessage(ctx context.Context, event *model.MessageEvent) error {
 	if event == nil || event.Message == nil {
-		return fmt.Errorf("invalid message event: event or message is nil")
+		return fmt.Errorf("invalid message event")
 	}
 
 	msg := event.Message
-
-	// 验证必要字段
-	if msg.SourceDriver == "" || msg.SourceRoomID == "" || msg.SourceMsgID == "" {
-		return fmt.Errorf("missing required fields: source_driver, source_room_id, or source_msg_id")
+	if msg.SourcePlatform == "" || msg.SourceRoomID == "" || msg.SourceMsgID == "" {
+		return fmt.Errorf("missing required fields")
 	}
 
-	// 生成消息指纹
 	if msg.Fingerprint == "" {
 		msg.Fingerprint = r.generateFingerprint(msg)
 	}
 
-	// 查找该房间的绑定关系
-	bindings := r.routeStore.GetBindingsByRoom(msg.SourceDriver, msg.SourceRoomID)
+	bindings := r.routeStore.GetBindingsByRoom(msg.SourcePlatform, msg.SourceRoomID)
 	if len(bindings) == 0 {
-		return nil // 无绑定关系，静默忽略
+		return nil
 	}
 
 	r.logger.Info("router", "Routing message", map[string]interface{}{
 		"fingerprint": msg.Fingerprint,
-		"driver":      msg.SourceDriver,
+		"platform":    msg.SourcePlatform,
 		"room_id":     msg.SourceRoomID,
 		"bindings":    len(bindings),
 	})
 
-	// 对每个绑定执行路由分发
 	for _, binding := range bindings {
 		r.routeToBinding(ctx, msg, binding)
 	}
 
-	// 即发即弃：立即返回，不等待下游结果
 	return nil
 }
 
-// routeToBinding 将消息路由到绑定的所有目标房间
+// routeToBinding 路由到绑定的所有目标房间
 func (r *Router) routeToBinding(ctx context.Context, msg *model.Message, binding *model.RoomBinding) {
 	for _, targetRoom := range binding.Rooms {
-		// 跳过来源房间（避免回声）
-		if targetRoom.Driver == msg.SourceDriver && targetRoom.RoomID == msg.SourceRoomID {
+		if targetRoom.Platform == msg.SourcePlatform && targetRoom.RoomID == msg.SourceRoomID {
 			continue
 		}
 
-		targetDriver, exists := r.driverRegistry.Get(targetRoom.Driver)
+		targetPlatform, exists := r.platformRegistry.Get(targetRoom.Platform)
 		if !exists {
-			r.logger.Error("router", "Target driver not found", map[string]interface{}{
-				"driver": targetRoom.Driver,
+			r.logger.Error("router", "Target platform not found", map[string]interface{}{
+				"platform": targetRoom.Platform,
 			})
 			continue
 		}
 
-		// ID 翻译并构造出站消息
 		outbound := &model.OutboundMessage{
-			TargetDriver: targetRoom.Driver,
-			TargetRoomID: targetRoom.RoomID,
-			Message:      r.translateMessage(msg, targetRoom.Driver, binding),
+			TargetPlatform: targetRoom.Platform,
+			TargetRoomID:   targetRoom.RoomID,
+			Message:        r.translateMessage(msg, targetRoom.Platform, binding),
 		}
 
-		// 异步发送消息
-		go r.sendMessageAsync(ctx, targetDriver, outbound, msg)
+		go r.sendMessageAsync(ctx, targetPlatform, outbound, msg)
 	}
 }
 
 // translateMessage 翻译消息中的 ID 引用
-func (r *Router) translateMessage(msg *model.Message, targetDriver string, binding *model.RoomBinding) *model.Message {
+func (r *Router) translateMessage(msg *model.Message, targetPlatform string, binding *model.RoomBinding) *model.Message {
 	translated := *msg
 
-	// 处理回复/引用消息
 	if msg.RefSourceID != "" {
-		if targetMsgID, found := r.messageMapStore.GetTargetID(msg.SourceDriver, msg.RefSourceID, targetDriver); found {
+		if targetMsgID, found := r.messageMapStore.GetTargetID(msg.SourcePlatform, msg.RefSourceID, targetPlatform); found {
 			translated.RefTargetID = targetMsgID
 		} else {
-			// 未找到映射，降级为普通消息
 			translated.RefSourceID = ""
 			translated.RefTargetID = ""
-			r.logger.Debug("router", "Reply reference not found, cleared", map[string]interface{}{
+			r.logger.Debug("router", "Referenced message mapping not found", map[string]interface{}{
 				"source_id": msg.RefSourceID,
 			})
 		}
 	}
 
-	// 处理编辑消息
 	if msg.Type == model.MsgTypeEdit && msg.EditTargetID != "" {
-		if targetMsgID, found := r.messageMapStore.GetTargetID(msg.SourceDriver, msg.EditTargetID, targetDriver); found {
+		if targetMsgID, found := r.messageMapStore.GetTargetID(msg.SourcePlatform, msg.EditTargetID, targetPlatform); found {
 			translated.EditTargetID = targetMsgID
 		} else {
-			// 无法编辑，转为普通消息
 			translated.Type = model.MsgTypeText
 			translated.EditTargetID = ""
 		}
 	}
 
-	// 处理提及转换
 	if len(msg.Mentions) > 0 {
-		translated.Mentions = r.translateMentions(msg.Mentions, msg.SourceDriver, targetDriver)
+		translated.Mentions = r.translateMentions(msg.Mentions, msg.SourcePlatform, targetPlatform)
 	}
 
 	return &translated
 }
 
 // translateMentions 翻译提及信息
-func (r *Router) translateMentions(mentions []model.Mention, sourceDriver, targetDriver string) []model.Mention {
+func (r *Router) translateMentions(mentions []model.Mention, sourcePlatform, targetPlatform string) []model.Mention {
 	translated := make([]model.Mention, len(mentions))
 	for i, mention := range mentions {
 		translated[i] = mention
-		if targetUserID, found := r.userMapStore.GetTargetUserID(sourceDriver, mention.UserID, targetDriver); found {
+		if targetUserID, found := r.userMapStore.GetTargetUserID(sourcePlatform, mention.UserID, targetPlatform); found {
 			translated[i].TargetID = targetUserID
 		}
 	}
 	return translated
 }
 
-// sendMessageAsync 异步发送消息到目标平台
-func (r *Router) sendMessageAsync(ctx context.Context, targetDriver driver.Driver, outbound *model.OutboundMessage, originalMsg *model.Message) {
+// sendMessageAsync 异步发送消息
+func (r *Router) sendMessageAsync(ctx context.Context, targetPlatform model.Platform, outbound *model.OutboundMessage, originalMsg *model.Message) {
 	callback := func(result *model.MessageSendResult) {
 		if !result.Success || result.TargetMsgID == "" {
-			r.logger.Error("router", "Message send failed", map[string]interface{}{
-				"target_driver": result.TargetDriver,
-				"error":         result.Error,
+			r.logger.Error("router", "Message sending failed", map[string]interface{}{
+				"target_platform": result.TargetPlatform,
+				"error":           result.Error,
 			})
 			return
 		}
 
-		// 异步写入 ID 映射
 		go func() {
 			mapping := &storage.MessageMapping{
-				SourceDriver: originalMsg.SourceDriver,
-				SourceMsgID:  originalMsg.SourceMsgID,
-				TargetDriver: result.TargetDriver,
-				TargetMsgID:  result.TargetMsgID,
-				CreatedAt:    time.Now(),
+				SourcePlatform: originalMsg.SourcePlatform,
+				SourceMsgID:    originalMsg.SourceMsgID,
+				TargetPlatform: result.TargetPlatform,
+				TargetMsgID:    result.TargetMsgID,
+				CreatedAt:      time.Now(),
 			}
 			if err := r.messageMapStore.Save(mapping); err != nil {
 				r.logger.Error("router", "Failed to save message mapping", map[string]interface{}{"error": err.Error()})
@@ -191,15 +188,15 @@ func (r *Router) sendMessageAsync(ctx context.Context, targetDriver driver.Drive
 		}()
 	}
 
-	if err := targetDriver.SendMessage(ctx, outbound, callback); err != nil {
+	if err := targetPlatform.SendMessage(ctx, outbound, callback); err != nil {
 		r.logger.Error("router", "Failed to submit message", map[string]interface{}{
-			"driver": targetDriver.Name(),
-			"error":  err.Error(),
+			"platform": targetPlatform.Name(),
+			"error":    err.Error(),
 		})
 	}
 }
 
-// generateFingerprint 生成消息指纹（简单拼接，无加密）
+// generateFingerprint 生成消息指纹
 func (r *Router) generateFingerprint(msg *model.Message) string {
-	return fmt.Sprintf("%s:%s:%s:%d", msg.SourceDriver, msg.SourceRoomID, msg.SourceMsgID, msg.Timestamp.UnixNano())
+	return fmt.Sprintf("%s:%s:%s:%d", msg.SourcePlatform, msg.SourceRoomID, msg.SourceMsgID, msg.Timestamp.UnixNano())
 }

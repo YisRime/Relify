@@ -1,5 +1,4 @@
 // Package storage 提供持久化存储功能
-// 包含消息映射、路由绑定、用户映射等存储实现
 package storage
 
 import (
@@ -13,24 +12,23 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// MessageMapStore 消息 ID 映射存储
-// 用于存储跨平台的消息 ID 映射关系，支持引用和编辑功能
+// MessageMapStore 消息ID映射存储
 type MessageMapStore struct {
 	db     *sql.DB
 	mu     sync.RWMutex
 	logger *logger.Logger
 }
 
-// MessageMapping 消息映射关系
+// MessageMapping 消息映射
 type MessageMapping struct {
-	SourceDriver string    `json:"source_driver"`
-	SourceMsgID  string    `json:"source_msg_id"`
-	TargetDriver string    `json:"target_driver"`
-	TargetMsgID  string    `json:"target_msg_id"`
-	CreatedAt    time.Time `json:"created_at"`
+	SourcePlatform string    `json:"source_platform"`
+	SourceMsgID    string    `json:"source_msg_id"`
+	TargetPlatform string    `json:"target_platform"`
+	TargetMsgID    string    `json:"target_msg_id"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
-// NewMessageMapStore 创建消息 ID 映射存储实例
+// NewMessageMapStore 创建消息映射存储
 func NewMessageMapStore(dbPath string, log *logger.Logger) (*MessageMapStore, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("database path cannot be empty")
@@ -49,7 +47,7 @@ func NewMessageMapStore(dbPath string, log *logger.Logger) (*MessageMapStore, er
 
 	if err := store.initSchema(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("init schema: %w", err)
+		return nil, fmt.Errorf("initialize schema: %w", err)
 	}
 
 	log.Info("storage", "MessageMapStore initialized")
@@ -58,20 +56,20 @@ func NewMessageMapStore(dbPath string, log *logger.Logger) (*MessageMapStore, er
 	return store, nil
 }
 
-// initSchema 初始化数据库表结构
+// initSchema 初始化表结构
 func (s *MessageMapStore) initSchema() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS message_mappings (
-		source_driver TEXT NOT NULL,
+		source_platform TEXT NOT NULL,
 		source_msg_id TEXT NOT NULL,
-		target_driver TEXT NOT NULL,
+		target_platform TEXT NOT NULL,
 		target_msg_id TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
-		PRIMARY KEY (source_driver, source_msg_id, target_driver)
+		PRIMARY KEY (source_platform, source_msg_id, target_platform)
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_created_at ON message_mappings(created_at);
-	CREATE INDEX IF NOT EXISTS idx_target_lookup ON message_mappings(target_driver, target_msg_id);
+	CREATE INDEX IF NOT EXISTS idx_target_lookup ON message_mappings(target_platform, target_msg_id);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -83,8 +81,8 @@ func (s *MessageMapStore) Save(mapping *MessageMapping) error {
 	if mapping == nil {
 		return fmt.Errorf("mapping cannot be nil")
 	}
-	if mapping.SourceDriver == "" || mapping.SourceMsgID == "" ||
-		mapping.TargetDriver == "" || mapping.TargetMsgID == "" {
+	if mapping.SourcePlatform == "" || mapping.SourceMsgID == "" ||
+		mapping.TargetPlatform == "" || mapping.TargetMsgID == "" {
 		return fmt.Errorf("invalid mapping: all fields are required")
 	}
 
@@ -92,11 +90,11 @@ func (s *MessageMapStore) Save(mapping *MessageMapping) error {
 	defer s.mu.Unlock()
 
 	query := `INSERT OR REPLACE INTO message_mappings 
-		(source_driver, source_msg_id, target_driver, target_msg_id, created_at)
+		(source_platform, source_msg_id, target_platform, target_msg_id, created_at)
 		VALUES (?, ?, ?, ?, ?)`
 
-	_, err := s.db.Exec(query, mapping.SourceDriver, mapping.SourceMsgID,
-		mapping.TargetDriver, mapping.TargetMsgID, mapping.CreatedAt.Unix())
+	_, err := s.db.Exec(query, mapping.SourcePlatform, mapping.SourceMsgID,
+		mapping.TargetPlatform, mapping.TargetMsgID, mapping.CreatedAt.Unix())
 	if err != nil {
 		return fmt.Errorf("save message mapping: %w", err)
 	}
@@ -105,42 +103,42 @@ func (s *MessageMapStore) Save(mapping *MessageMapping) error {
 }
 
 // GetTargetID 根据来源消息查找目标平台的消息 ID
-func (s *MessageMapStore) GetTargetID(sourceDriver, sourceMsgID, targetDriver string) (string, bool) {
+func (s *MessageMapStore) GetTargetID(sourcePlatform, sourceMsgID, targetPlatform string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var targetMsgID string
 	query := `SELECT target_msg_id FROM message_mappings
-		WHERE source_driver = ? AND source_msg_id = ? AND target_driver = ?`
+		WHERE source_platform = ? AND source_msg_id = ? AND target_platform = ?`
 
-	err := s.db.QueryRow(query, sourceDriver, sourceMsgID, targetDriver).Scan(&targetMsgID)
+	err := s.db.QueryRow(query, sourcePlatform, sourceMsgID, targetPlatform).Scan(&targetMsgID)
 	return targetMsgID, err == nil
 }
 
 // GetAllTargets 获取一条消息在所有目标平台的映射 ID
 // 参数：
-//   - sourceDriver: 来源驱动名称
+//   - sourcePlatform: 来源平台名称
 //   - sourceMsgID: 来源消息 ID
 //
 // 返回：
 //   - []MessageMapping: 所有映射关系列表
 //   - error: 错误信息
-func (s *MessageMapStore) GetAllTargets(sourceDriver, sourceMsgID string) ([]MessageMapping, error) {
+func (s *MessageMapStore) GetAllTargets(sourcePlatform, sourceMsgID string) ([]MessageMapping, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	query := `
-		SELECT source_driver, source_msg_id, target_driver, target_msg_id, created_at
+		SELECT source_platform, source_msg_id, target_platform, target_msg_id, created_at
 		FROM message_mappings
-		WHERE source_driver = ? AND source_msg_id = ?
+		WHERE source_platform = ? AND source_msg_id = ?
 	`
 
-	rows, err := s.db.Query(query, sourceDriver, sourceMsgID)
+	rows, err := s.db.Query(query, sourcePlatform, sourceMsgID)
 	if err != nil {
 		s.logger.Error("storage", "Failed to query message mappings", map[string]interface{}{
-			"source_driver": sourceDriver,
-			"source_msg_id": sourceMsgID,
-			"error":         err.Error(),
+			"source_platform": sourcePlatform,
+			"source_msg_id":   sourceMsgID,
+			"error":           err.Error(),
 		})
 		return nil, err
 	}
@@ -150,7 +148,7 @@ func (s *MessageMapStore) GetAllTargets(sourceDriver, sourceMsgID string) ([]Mes
 	for rows.Next() {
 		var m MessageMapping
 		var createdAt int64
-		if err := rows.Scan(&m.SourceDriver, &m.SourceMsgID, &m.TargetDriver, &m.TargetMsgID, &createdAt); err != nil {
+		if err := rows.Scan(&m.SourcePlatform, &m.SourceMsgID, &m.TargetPlatform, &m.TargetMsgID, &createdAt); err != nil {
 			s.logger.Error("storage", "Failed to scan message mapping", map[string]interface{}{
 				"error": err.Error(),
 			})

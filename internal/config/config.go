@@ -1,5 +1,4 @@
 // Package config 提供应用配置管理
-// 支持从 YAML 文件加载配置，包含数据库、驱动、日志等配置项
 package config
 
 import (
@@ -11,39 +10,39 @@ import (
 
 // Config 应用配置
 type Config struct {
-	// 数据目录配置
-	DataDir string `yaml:"data_dir"`
-
-	// 日志级别配置
-	LogLevel string `yaml:"log_level"`
-
-	// 驱动配置
-	Drivers map[string]DriverConfig `yaml:"drivers"`
+	DataDir     string
+	LogLevel    string
+	Mode        string
+	HubPlatform string
+	Platforms   map[string]PlatformConfig
 }
 
-// DatabaseConfig 数据库配置（已废弃，数据库路径现在自动设置为 data_dir/relify.db）
-type DatabaseConfig struct {
-	Path string `yaml:"path"` // 数据库文件路径
-}
-
-// GetDatabasePath 获取数据库文件路径
+// GetDatabasePath 获取数据库路径
 func (c *Config) GetDatabasePath() string {
 	return c.DataDir + "/relify.db"
 }
 
-// GetLogsDir 获取日志目录路径
+// GetLogsDir 获取日志目录
 func (c *Config) GetLogsDir() string {
 	return c.DataDir + "/logs"
 }
 
-// DriverConfig 驱动配置
-type DriverConfig struct {
-	Type    string                 `yaml:"type"`    // 驱动类型：telegram, discord, matrix
-	Enabled bool                   `yaml:"enabled"` // 是否启用
-	Config  map[string]interface{} `yaml:"config"`  // 驱动特定配置
+// PlatformConfig 平台配置
+type PlatformConfig struct {
+	Type    string
+	Enabled bool
+	Config  map[string]interface{}
 }
 
-// LoadConfig 从文件加载配置
+// RouteType 路由类型
+type RouteType string
+
+const (
+	RouteTypeMirror    RouteType = "mirror"
+	RouteTypeAggregate RouteType = "aggregate"
+)
+
+// LoadConfig 加载配置
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -59,33 +58,47 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// SaveConfig 保存配置到文件
+// SaveConfig 保存配置
 func SaveConfig(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return fmt.Errorf("serialize config: %w", err)
 	}
 	return os.WriteFile(path, data, 0644)
 }
 
-// setDefaults 设置默认配置值
+// setDefaults 设置默认值
 func setDefaults(cfg *Config) {
-	// 数据目录默认值
 	if cfg.DataDir == "" {
 		cfg.DataDir = "./data"
 	}
-
-	// 日志默认值
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
 }
 
-// Validate 验证配置的有效性
+// Validate 验证配置
 func (c *Config) Validate() error {
 	validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
 	if !validLevels[c.LogLevel] {
 		return fmt.Errorf("invalid log level: %s", c.LogLevel)
+	}
+
+	validModes := map[string]bool{"peer": true, "hub": true}
+	if c.Mode == "" {
+		return fmt.Errorf("mode must be specified: 'peer' or 'hub'")
+	}
+	if !validModes[c.Mode] {
+		return fmt.Errorf("invalid mode: %s (must be 'peer' or 'hub')", c.Mode)
+	}
+
+	if c.Mode == "hub" {
+		if c.HubPlatform == "" {
+			return fmt.Errorf("hub_platform must be specified in hub mode")
+		}
+		if _, exists := c.Platforms[c.HubPlatform]; !exists {
+			return fmt.Errorf("hub_platform '%s' not found in platform configurations", c.HubPlatform)
+		}
 	}
 
 	return nil

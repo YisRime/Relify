@@ -1,5 +1,4 @@
 // Package core 提供核心业务逻辑层
-// 六边形架构的应用核心，协调驱动、路由、存储等组件
 package core
 
 import (
@@ -7,93 +6,105 @@ import (
 	"fmt"
 
 	"Relify/internal/config"
-	"Relify/internal/driver"
 	"Relify/internal/logger"
+	"Relify/internal/model"
 	"Relify/internal/router"
 	"Relify/internal/storage"
 )
 
-// Core 核心层（六边形架构的应用核心）
+// Core 核心层
 type Core struct {
-	router          *router.Router
-	driverRegistry  *driver.Registry
-	routeStore      *storage.RouteStore
-	messageMapStore *storage.MessageMapStore
-	userMapStore    *storage.UserMapStore
-	config          *config.Config
-	logger          *logger.Logger
+	router           *router.Router
+	platformRegistry *model.PlatformRegistry
+	routeStore       *storage.RouteStore
+	messageMapStore  *storage.MessageMapStore
+	userMapStore     *storage.UserMapStore
+	config           *config.Config
+	logger           *logger.Logger
 }
 
 // Config 核心层配置
 type Config struct {
-	DatabasePath string         // SQLite 数据库路径
-	AppConfig    *config.Config // 应用配置
+	DatabasePath string
+	AppConfig    *config.Config
 }
 
 // NewCore 创建核心层实例
 func NewCore(cfg *Config) (*Core, error) {
-	// 使用全局日志记录器
 	log := logger.GetGlobal()
+	log.Info("core", "Initializing core layer")
 
-	log.Info("core", "Initializing Relify core")
-
-	// 初始化存储
 	routeStore, err := storage.NewRouteStore(cfg.DatabasePath, log)
 	if err != nil {
-		return nil, fmt.Errorf("init route store: %w", err)
+		return nil, fmt.Errorf("initialize route store: %w", err)
 	}
 
 	messageMapStore, err := storage.NewMessageMapStore(cfg.DatabasePath, log)
 	if err != nil {
 		routeStore.Close()
-		return nil, fmt.Errorf("init message map store: %w", err)
+		return nil, fmt.Errorf("initialize message map store: %w", err)
 	}
 
 	userMapStore, err := storage.NewUserMapStore(cfg.DatabasePath, log)
 	if err != nil {
 		routeStore.Close()
 		messageMapStore.Close()
-		return nil, fmt.Errorf("init user map store: %w", err)
+		return nil, fmt.Errorf("initialize user map store: %w", err)
 	}
 
-	driverRegistry := driver.NewRegistry()
-	routerEngine := router.NewRouter(driverRegistry, routeStore, messageMapStore, userMapStore, log)
+	platformRegistry := model.NewPlatformRegistry()
+	platformConfigs := make(map[string]config.RouteType)
 
-	log.Info("core", "Core initialized successfully")
+	routerEngine := router.NewRouter(
+		platformRegistry,
+		routeStore,
+		messageMapStore,
+		userMapStore,
+		cfg.AppConfig.Mode,
+		cfg.AppConfig.HubPlatform,
+		platformConfigs,
+		log,
+	)
+
+	log.Info("core", "Core layer initialized", map[string]interface{}{
+		"mode":         cfg.AppConfig.Mode,
+		"hub_platform": cfg.AppConfig.HubPlatform,
+	})
 
 	return &Core{
-		router:          routerEngine,
-		driverRegistry:  driverRegistry,
-		routeStore:      routeStore,
-		messageMapStore: messageMapStore,
-		userMapStore:    userMapStore,
-		config:          cfg.AppConfig,
-		logger:          log,
+		router:           routerEngine,
+		platformRegistry: platformRegistry,
+		routeStore:       routeStore,
+		messageMapStore:  messageMapStore,
+		userMapStore:     userMapStore,
+		config:           cfg.AppConfig,
+		logger:           log,
 	}, nil
 }
 
-// RegisterDriver 注册平台驱动
-func (c *Core) RegisterDriver(drv driver.Driver) {
-	c.driverRegistry.Register(drv)
+// RegisterPlatform 注册平台适配器
+func (c *Core) RegisterPlatform(p model.Platform) {
+	c.platformRegistry.Register(p)
+	c.router.UpdatePlatformRouteType(p.Name(), p.GetRouteType())
 }
 
-// GetInboundHandler 获取入站处理器（供驱动调用）
-func (c *Core) GetInboundHandler() driver.InboundHandler {
+// GetInboundHandler 获取入站处理器
+func (c *Core) GetInboundHandler() model.InboundHandler {
 	return c.router
 }
 
-// Start 启动核心层及所有驱动
+// Start 启动核心层及所有平台
 func (c *Core) Start(ctx context.Context) error {
 	c.logger.Info("core", "Starting Relify")
 
-	for name, drv := range c.driverRegistry.All() {
-		c.logger.Info("core", "Starting driver", map[string]interface{}{"driver": name})
-		if err := drv.Start(ctx); err != nil {
-			c.logger.Error("core", "Failed to start driver", map[string]interface{}{
-				"driver": name,
-				"error":  err.Error(),
+	for name, p := range c.platformRegistry.All() {
+		c.logger.Info("core", "Starting platform", map[string]interface{}{"platform": name})
+		if err := p.Start(ctx); err != nil {
+			c.logger.Error("core", "Failed to start platform", map[string]interface{}{
+				"platform": name,
+				"error":    err.Error(),
 			})
-			return fmt.Errorf("start driver %s: %w", name, err)
+			return fmt.Errorf("start platform %s: %w", name, err)
 		}
 	}
 
@@ -101,21 +112,19 @@ func (c *Core) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop 停止核心层及所有驱动
+// Stop 停止核心层及所有平台
 func (c *Core) Stop(ctx context.Context) error {
 	c.logger.Info("core", "Stopping Relify")
 
-	// 停止所有驱动
-	for name, drv := range c.driverRegistry.All() {
-		if err := drv.Stop(ctx); err != nil {
-			c.logger.Error("core", "Failed to stop driver", map[string]interface{}{
-				"driver": name,
-				"error":  err.Error(),
+	for name, p := range c.platformRegistry.All() {
+		if err := p.Stop(ctx); err != nil {
+			c.logger.Error("core", "Failed to stop platform", map[string]interface{}{
+				"platform": name,
+				"error":    err.Error(),
 			})
 		}
 	}
 
-	// 关闭存储
 	if err := c.routeStore.Close(); err != nil {
 		return fmt.Errorf("close route store: %w", err)
 	}

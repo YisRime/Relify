@@ -6,8 +6,16 @@ data_dir: "./data"  # 数据目录路径，用于存放数据库和日志文件
 # 日志级别配置
 log_level: "info"  # debug, info, warn, error
 
-# 驱动配置
-drivers:
+# 架构模式配置
+# - peer: 对等架构，所有平台逻辑对等
+# - hub: 中心平台架构，所有消息在中心平台处理
+mode: "hub"
+
+# 中心平台配置（仅在 mode 为 hub 时需要，必须显式指定）
+hub_platform: "matrix"
+
+# 平台配置
+platforms:
   telegram:
     type: "telegram"
     enabled: true
@@ -25,7 +33,7 @@ drivers:
 
   matrix:
     type: "matrix"
-    enabled: false
+    enabled: true
     config:
       homeserver: "https://matrix.org"
       access_token: "YOUR_ACCESS_TOKEN"

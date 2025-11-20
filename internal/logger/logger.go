@@ -1,5 +1,4 @@
 // Package logger 提供统一的日志系统
-// 支持多种日志级别、格式（JSON/Text）和输出目标
 package logger
 
 import (
@@ -69,27 +68,6 @@ type Logger struct {
 	mu     sync.Mutex
 }
 
-// MultiWriter 多输出写入器
-type MultiWriter struct {
-	writers []io.Writer
-}
-
-// NewMultiWriter 创建新的多输出写入器
-func NewMultiWriter(writers ...io.Writer) *MultiWriter {
-	return &MultiWriter{writers: writers}
-}
-
-// Write 实现 io.Writer 接口
-func (mw *MultiWriter) Write(p []byte) (n int, err error) {
-	for _, w := range mw.writers {
-		n, err = w.Write(p)
-		if err != nil {
-			return
-		}
-	}
-	return len(p), nil
-}
-
 // LogEntry 日志条目（用于 JSON 格式）
 type LogEntry struct {
 	Timestamp string                 `json:"timestamp"`
@@ -109,17 +87,13 @@ func New(level Level, format Format, output io.Writer) *Logger {
 }
 
 // NewFromConfig 从配置创建日志记录器
-// logsDir: 日志目录路径，日志文件将以程序启动时间命名存放在此目录下
 func NewFromConfig(levelStr, logsDir string) (*Logger, error) {
 	level := ParseLevel(levelStr)
-	format := JSONFormat // 固定使用 JSON 格式
+	format := JSONFormat
 
-	// 确保日志目录存在
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		return nil, fmt.Errorf("create logs directory: %w", err)
+		return nil, fmt.Errorf("create log directory: %w", err)
 	}
-
-	// 生成日志文件名：使用程序启动时间（精确到秒）
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
 	logFile := fmt.Sprintf("%s/%s.log", logsDir, timestamp)
 
@@ -129,9 +103,8 @@ func NewFromConfig(levelStr, logsDir string) (*Logger, error) {
 		return nil, fmt.Errorf("open log file: %w", err)
 	}
 
-	// 创建多输出写入器，同时输出到文件和 stderr
-	output := NewMultiWriter(f, os.Stderr)
-
+	// 同时输出到文件和 stderr
+	output := io.MultiWriter(f, os.Stderr)
 	return New(level, format, output), nil
 }
 
@@ -173,29 +146,24 @@ func (l *Logger) log(level Level, module, message string, fields ...map[string]i
 			Module:    module,
 			Message:   message,
 		}
-
 		if len(fields) > 0 && fields[0] != nil {
 			entry.Fields = fields[0]
 		}
-
 		data, err := json.Marshal(entry)
 		if err != nil {
 			return
 		}
-
 		fmt.Fprintf(l.output, "%s\n", data)
 	} else {
-		// Text format: [timestamp] LEVEL [module] message
+		// Text format
 		fmt.Fprintf(l.output, "[%s] %s", timestamp, level.String())
 		if module != "" {
 			fmt.Fprintf(l.output, " [%s]", module)
 		}
 		fmt.Fprintf(l.output, " %s", message)
-
 		if len(fields) > 0 && fields[0] != nil {
 			fmt.Fprintf(l.output, " %v", fields[0])
 		}
-
 		fmt.Fprintln(l.output)
 	}
 }

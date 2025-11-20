@@ -1,5 +1,4 @@
 // Relify - 跨平台消息桥接系统
-// 基于六边形架构设计，支持 Telegram、Discord、Matrix 等多平台消息同步
 package main
 
 import (
@@ -17,43 +16,34 @@ import (
 )
 
 func main() {
-	// 解析命令行参数
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
 	flag.Parse()
 
-	// 加载配置文件
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 验证配置有效性
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 确保数据目录存在
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create data directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 初始化日志系统
 	log, err := logger.NewFromConfig(cfg.LogLevel, cfg.GetLogsDir())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
 		os.Exit(1)
 	}
-	logger.SetGlobal(log) // 设置全局日志记录器
+	logger.SetGlobal(log)
 
-	// 获取数据库路径
-	dbPath := cfg.GetDatabasePath()
-
-	// 创建核心实例
 	coreInst, err := core.NewCore(&core.Config{
-		DatabasePath: dbPath,
+		DatabasePath: cfg.GetDatabasePath(),
 		AppConfig:    cfg,
 	})
 	if err != nil {
@@ -61,29 +51,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO: 注册驱动（后续实现 Telegram、Discord、Matrix 驱动）
-	// 示例：
-	// telegramDriver := telegram.NewDriver(cfg.Drivers["telegram"])
-	// coreInst.RegisterDriver(telegramDriver)
+	// TODO: 注册平台适配器
 
-	// 启动核心层
 	ctx := context.Background()
 	if err := coreInst.Start(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start core: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to start: %v\n", err)
 		os.Exit(1)
 	}
 
 	logger.Info("main", "Relify started successfully")
 	logger.Info("main", "Press Ctrl+C to stop")
 
-	// 优雅关闭信号处理
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
 
 	logger.Info("main", "Shutting down...")
 
-	// 停止核心层（带超时）
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
