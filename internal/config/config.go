@@ -11,19 +11,29 @@ import (
 
 // Config 应用配置
 type Config struct {
-	// 数据库配置
-	Database DatabaseConfig `yaml:"database"`
+	// 数据目录配置
+	DataDir string `yaml:"data_dir"`
+
+	// 日志级别配置
+	LogLevel string `yaml:"log_level"`
 
 	// 驱动配置
 	Drivers map[string]DriverConfig `yaml:"drivers"`
-
-	// 日志配置
-	Log LogConfig `yaml:"log"`
 }
 
-// DatabaseConfig 数据库配置
+// DatabaseConfig 数据库配置（已废弃，数据库路径现在自动设置为 data_dir/relify.db）
 type DatabaseConfig struct {
-	Path string `yaml:"path"` // 数据库文件路径，默认 "./relify.db"
+	Path string `yaml:"path"` // 数据库文件路径
+}
+
+// GetDatabasePath 获取数据库文件路径
+func (c *Config) GetDatabasePath() string {
+	return c.DataDir + "/relify.db"
+}
+
+// GetLogsDir 获取日志目录路径
+func (c *Config) GetLogsDir() string {
+	return c.DataDir + "/logs"
 }
 
 // DriverConfig 驱动配置
@@ -31,14 +41,6 @@ type DriverConfig struct {
 	Type    string                 `yaml:"type"`    // 驱动类型：telegram, discord, matrix
 	Enabled bool                   `yaml:"enabled"` // 是否启用
 	Config  map[string]interface{} `yaml:"config"`  // 驱动特定配置
-}
-
-// LogConfig 日志配置
-type LogConfig struct {
-	Level  string `yaml:"level"`  // 日志级别：debug, info, warn, error
-	Format string `yaml:"format"` // 日志格式：json, text
-	Output string `yaml:"output"` // 输出目标：stdout, stderr, file
-	File   string `yaml:"file"`   // 日志文件路径（当 output=file 时）
 }
 
 // LoadConfig 从文件加载配置
@@ -68,38 +70,22 @@ func SaveConfig(path string, cfg *Config) error {
 
 // setDefaults 设置默认配置值
 func setDefaults(cfg *Config) {
-	// 数据库默认值
-	if cfg.Database.Path == "" {
-		cfg.Database.Path = "./relify.db"
+	// 数据目录默认值
+	if cfg.DataDir == "" {
+		cfg.DataDir = "./data"
 	}
 
 	// 日志默认值
-	if cfg.Log.Level == "" {
-		cfg.Log.Level = "info"
-	}
-	if cfg.Log.Format == "" {
-		cfg.Log.Format = "json"
-	}
-	if cfg.Log.Output == "" {
-		cfg.Log.Output = "stdout"
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
 	}
 }
 
 // Validate 验证配置的有效性
 func (c *Config) Validate() error {
 	validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
-	if !validLevels[c.Log.Level] {
-		return fmt.Errorf("invalid log level: %s", c.Log.Level)
-	}
-
-	validFormats := map[string]bool{"json": true, "text": true}
-	if !validFormats[c.Log.Format] {
-		return fmt.Errorf("invalid log format: %s", c.Log.Format)
-	}
-
-	validOutputs := map[string]bool{"stdout": true, "stderr": true, "file": true}
-	if !validOutputs[c.Log.Output] {
-		return fmt.Errorf("invalid log output: %s", c.Log.Output)
+	if !validLevels[c.LogLevel] {
+		return fmt.Errorf("invalid log level: %s", c.LogLevel)
 	}
 
 	return nil

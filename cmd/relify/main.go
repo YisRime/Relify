@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -35,18 +34,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 初始化数据库路径
-	dbPath := cfg.Database.Path
-	if dbPath == "" {
-		dbPath = "./data/relify.db"
-	}
-
-	// 确保数据库目录存在
-	dbDir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create database directory: %v\n", err)
+	// 确保数据目录存在
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create data directory: %v\n", err)
 		os.Exit(1)
 	}
+
+	// 初始化日志系统
+	log, err := logger.NewFromConfig(cfg.LogLevel, cfg.GetLogsDir())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+	logger.SetGlobal(log) // 设置全局日志记录器
+
+	// 获取数据库路径
+	dbPath := cfg.GetDatabasePath()
 
 	// 创建核心实例
 	coreInst, err := core.NewCore(&core.Config{

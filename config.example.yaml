@@ -1,15 +1,10 @@
 # Relify 配置文件示例
 
-# 数据库配置
-database:
-  path: "./relify.db"
+# 数据目录配置
+data_dir: "./data"  # 数据目录路径，用于存放数据库和日志文件
 
-# 日志配置
-log:
-  level: "info"      # debug, info, warn, error
-  format: "json"     # json, text
-  output: "stdout"   # stdout, stderr, file
-  # file: "./logs/relify.log"  # 当 output=file 时使用
+# 日志级别配置
+log_level: "info"  # debug, info, warn, error
 
 # 驱动配置
 drivers:

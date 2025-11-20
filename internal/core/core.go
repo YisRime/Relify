@@ -32,13 +32,8 @@ type Config struct {
 
 // NewCore 创建核心层实例
 func NewCore(cfg *Config) (*Core, error) {
-	// 初始化日志系统
-	log, err := logger.NewFromConfig(cfg.AppConfig.Log.Level, cfg.AppConfig.Log.Format,
-		cfg.AppConfig.Log.Output, cfg.AppConfig.Log.File)
-	if err != nil {
-		return nil, fmt.Errorf("init logger: %w", err)
-	}
-	logger.SetGlobal(log)
+	// 使用全局日志记录器
+	log := logger.GetGlobal()
 
 	log.Info("core", "Initializing Relify core")
 
