@@ -16,9 +16,7 @@ import (
 type Core struct {
 	router           *router.Router
 	platformRegistry *model.PlatformRegistry
-	routeStore       *storage.RouteStore
-	messageMapStore  *storage.MessageMapStore
-	userMapStore     *storage.UserMapStore
+	store            *storage.Store
 	config           *config.Config
 	logger           *logger.Logger
 }
@@ -34,32 +32,19 @@ func NewCore(cfg *Config) (*Core, error) {
 	log := logger.GetGlobal()
 	log.Info("core", "Initializing core layer")
 
-	routeStore, err := storage.NewRouteStore(cfg.DatabasePath, log)
+	// 创建统一存储
+	store, err := storage.NewStore(cfg.DatabasePath, log)
 	if err != nil {
-		return nil, fmt.Errorf("initialize route store: %w", err)
-	}
-
-	messageMapStore, err := storage.NewMessageMapStore(cfg.DatabasePath, log)
-	if err != nil {
-		routeStore.Close()
-		return nil, fmt.Errorf("initialize message map store: %w", err)
-	}
-
-	userMapStore, err := storage.NewUserMapStore(cfg.DatabasePath, log)
-	if err != nil {
-		messageMapStore.Close()
-		routeStore.Close()
-		return nil, fmt.Errorf("initialize user map store: %w", err)
+		return nil, fmt.Errorf("initialize storage: %w", err)
 	}
 
 	platformRegistry := model.NewPlatformRegistry()
 	platformConfigs := make(map[string]config.RouteType)
 
+	// 创建路由引擎
 	routerEngine := router.NewRouter(
 		platformRegistry,
-		routeStore,
-		messageMapStore,
-		userMapStore,
+		store,
 		cfg.AppConfig.Mode,
 		cfg.AppConfig.HubPlatform,
 		platformConfigs,
@@ -74,9 +59,7 @@ func NewCore(cfg *Config) (*Core, error) {
 	return &Core{
 		router:           routerEngine,
 		platformRegistry: platformRegistry,
-		routeStore:       routeStore,
-		messageMapStore:  messageMapStore,
-		userMapStore:     userMapStore,
+		store:            store,
 		config:           cfg.AppConfig,
 		logger:           log,
 	}, nil
@@ -125,21 +108,12 @@ func (c *Core) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 确保所有存储都被关闭，即使某个失败
-	var closeErr error
-	if err := c.userMapStore.Close(); err != nil {
-		c.logger.Error("core", "Failed to close user map store", map[string]interface{}{"error": err.Error()})
-		closeErr = err
-	}
-	if err := c.messageMapStore.Close(); err != nil {
-		c.logger.Error("core", "Failed to close message map store", map[string]interface{}{"error": err.Error()})
-		closeErr = err
-	}
-	if err := c.routeStore.Close(); err != nil {
-		c.logger.Error("core", "Failed to close route store", map[string]interface{}{"error": err.Error()})
-		closeErr = err
+	// 关闭统一存储
+	if err := c.store.Close(); err != nil {
+		c.logger.Error("core", "Failed to close store", map[string]interface{}{"error": err.Error()})
+		return err
 	}
 
 	c.logger.Info("core", "Relify stopped")
-	return closeErr
+	return nil
 }

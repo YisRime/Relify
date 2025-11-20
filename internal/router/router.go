@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"Relify/internal/config"
 	"Relify/internal/logger"
@@ -16,9 +15,7 @@ import (
 // Router 路由引擎
 type Router struct {
 	platformRegistry *model.PlatformRegistry
-	routeStore       *storage.RouteStore
-	messageMapStore  *storage.MessageMapStore
-	userMapStore     *storage.UserMapStore
+	store            *storage.Store
 	logger           *logger.Logger
 	mode             string
 	hubPlatform      string
@@ -29,9 +26,7 @@ type Router struct {
 // NewRouter 创建路由引擎
 func NewRouter(
 	platformRegistry *model.PlatformRegistry,
-	routeStore *storage.RouteStore,
-	messageMapStore *storage.MessageMapStore,
-	userMapStore *storage.UserMapStore,
+	store *storage.Store,
 	mode string,
 	hubPlatform string,
 	platformConfigs map[string]config.RouteType,
@@ -39,9 +34,7 @@ func NewRouter(
 ) *Router {
 	return &Router{
 		platformRegistry: platformRegistry,
-		routeStore:       routeStore,
-		messageMapStore:  messageMapStore,
-		userMapStore:     userMapStore,
+		store:            store,
 		logger:           log,
 		mode:             mode,
 		hubPlatform:      hubPlatform,
@@ -75,7 +68,7 @@ func (r *Router) HandleMessage(ctx context.Context, event *model.MessageEvent) e
 		msg.Fingerprint = fmt.Sprintf("%s:%s:%s:%d", msg.SourcePlatform, msg.SourceRoomID, msg.SourceMsgID, msg.Timestamp.UnixNano())
 	}
 
-	bindings := r.routeStore.GetBindingsByRoom(msg.SourcePlatform, msg.SourceRoomID)
+	bindings := r.store.GetBindingsByRoom(msg.SourcePlatform, msg.SourceRoomID)
 	if len(bindings) == 0 {
 		return nil
 	}
@@ -124,7 +117,7 @@ func (r *Router) translateMessage(msg *model.Message, targetPlatform string, bin
 	translated := *msg
 
 	if msg.RefSourceID != "" {
-		if targetMsgID, found := r.messageMapStore.GetTargetID(msg.SourcePlatform, msg.RefSourceID, targetPlatform); found {
+		if targetMsgID, found := r.store.GetTargetMessageID(msg.SourcePlatform, msg.RefSourceID, targetPlatform); found {
 			translated.RefTargetID = targetMsgID
 		} else {
 			translated.RefSourceID = ""
@@ -136,7 +129,7 @@ func (r *Router) translateMessage(msg *model.Message, targetPlatform string, bin
 	}
 
 	if msg.Type == model.MsgTypeEdit && msg.EditTargetID != "" {
-		if targetMsgID, found := r.messageMapStore.GetTargetID(msg.SourcePlatform, msg.EditTargetID, targetPlatform); found {
+		if targetMsgID, found := r.store.GetTargetMessageID(msg.SourcePlatform, msg.EditTargetID, targetPlatform); found {
 			translated.EditTargetID = targetMsgID
 		} else {
 			translated.Type = model.MsgTypeText
@@ -156,7 +149,7 @@ func (r *Router) translateMentions(mentions []model.Mention, sourcePlatform, tar
 	translated := make([]model.Mention, len(mentions))
 	for i, mention := range mentions {
 		translated[i] = mention
-		if targetUserID, found := r.userMapStore.GetTargetUserID(sourcePlatform, mention.UserID, targetPlatform); found {
+		if targetUserID, found := r.store.GetTargetUserID(sourcePlatform, mention.UserID, targetPlatform); found {
 			translated[i].TargetID = targetUserID
 		}
 	}
@@ -175,14 +168,13 @@ func (r *Router) sendMessageAsync(ctx context.Context, targetPlatform model.Plat
 		}
 
 		go func() {
-			mapping := &storage.MessageMapping{
-				SourcePlatform: originalMsg.SourcePlatform,
-				SourceMsgID:    originalMsg.SourceMsgID,
-				TargetPlatform: result.TargetPlatform,
-				TargetMsgID:    result.TargetMsgID,
-				CreatedAt:      time.Now(),
-			}
-			if err := r.messageMapStore.Save(mapping); err != nil {
+			if err := r.store.SaveMessageMapping(
+				originalMsg.SourcePlatform,
+				originalMsg.SourceMsgID,
+				result.TargetPlatform,
+				result.TargetMsgID,
+				"", // binding_id 可以从上下文获取
+			); err != nil {
 				r.logger.Error("router", "Failed to save message mapping", map[string]interface{}{"error": err.Error()})
 			}
 		}()
