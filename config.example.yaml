@@ -1,0 +1,42 @@
+# Relify 配置文件示例
+
+# 数据库配置
+database:
+  path: "./relify.db"
+
+# 日志配置
+log:
+  level: "info"      # debug, info, warn, error
+  format: "json"     # json, text
+  output: "stdout"   # stdout, stderr, file
+  # file: "./logs/relify.log"  # 当 output=file 时使用
+
+# HTTP 服务器配置
+server:
+  host: "127.0.0.1"
+  port: 8080
+
+# 驱动配置
+# 注意: 房间绑定由系统自动管理，通过 HTTP API 动态添加/删除
+drivers:
+  telegram:
+    type: "telegram"
+    enabled: true
+    config:
+      bot_token: "YOUR_BOT_TOKEN"
+      api_id: 12345
+      api_hash: "YOUR_API_HASH"
+
+  discord:
+    type: "discord"
+    enabled: true
+    config:
+      bot_token: "YOUR_BOT_TOKEN"
+      webhook_url: "https://discord.com/api/webhooks/..."
+
+  matrix:
+    type: "matrix"
+    enabled: false
+    config:
+      homeserver: "https://matrix.org"
+      access_token: "YOUR_ACCESS_TOKEN"
