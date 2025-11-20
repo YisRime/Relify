@@ -1,3 +1,5 @@
+// Package storage 提供持久化存储功能
+// 包含消息映射、路由绑定、用户映射等存储实现
 package storage
 
 import (
@@ -5,13 +7,15 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"Relify/internal/logger"
 )
 
-// UserMapping 用户 ID 映射
+// UserMapping 用户 ID 映射关系
 type UserMapping struct {
-	SourceDriver string    // 来源驱动
+	SourceDriver string    // 来源驱动名称
 	SourceUserID string    // 来源用户 ID
-	TargetDriver string    // 目标驱动
+	TargetDriver string    // 目标驱动名称
 	TargetUserID string    // 目标用户 ID
 	DisplayName  string    // 显示名称（用于回退）
 	Username     string    // 用户名（可选）
@@ -20,25 +24,47 @@ type UserMapping struct {
 }
 
 // UserMapStore 用户 ID 映射存储
+// 用于存储跨平台的用户 ID 映射关系，支持提及功能
 type UserMapStore struct {
-	db *sql.DB
-	mu sync.RWMutex
+	db     *sql.DB
+	mu     sync.RWMutex
+	logger *logger.Logger
 }
 
-// NewUserMapStore 创建用户映射存储
-func NewUserMapStore(dbPath string) (*UserMapStore, error) {
+// NewUserMapStore 创建用户 ID 映射存储实例
+// 参数：
+//   - dbPath: SQLite 数据库文件路径
+//   - log: 日志记录器（如果为 nil，使用全局日志记录器）
+//
+// 返回：
+//   - *UserMapStore: 用户映射存储实例
+//   - error: 错误信息
+func NewUserMapStore(dbPath string, log *logger.Logger) (*UserMapStore, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("database path cannot be empty")
+	}
+
 	db, err := sql.Open("sqlite", dbPath+"?_journal=WAL&_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
+	// 如果未提供 logger，使用全局 logger
+	if log == nil {
+		log = logger.GetGlobal()
+	}
+
 	store := &UserMapStore{
-		db: db,
+		db:     db,
+		logger: log,
 	}
 
 	if err := store.initSchema(); err != nil {
-		return nil, err
+		db.Close()
+		return nil, fmt.Errorf("init schema: %w", err)
 	}
+
+	store.logger.Info("storage", "UserMapStore initialized")
 
 	return store, nil
 }
@@ -66,8 +92,26 @@ func (s *UserMapStore) initSchema() error {
 	return err
 }
 
-// Save 保存或更新用户映射
+// Save 保存或更新用户映射关系
+// 参数：
+//   - mapping: 用户映射关系
+//
+// 返回：
+//   - error: 错误信息
 func (s *UserMapStore) Save(mapping *UserMapping) error {
+	if mapping == nil {
+		return fmt.Errorf("mapping cannot be nil")
+	}
+
+	if mapping.SourceDriver == "" || mapping.SourceUserID == "" ||
+		mapping.TargetDriver == "" || mapping.TargetUserID == "" {
+		return fmt.Errorf("invalid mapping: source_driver, source_user_id, target_driver, and target_user_id are required")
+	}
+
+	if mapping.DisplayName == "" {
+		return fmt.Errorf("display_name is required")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -100,10 +144,36 @@ func (s *UserMapStore) Save(mapping *UserMapping) error {
 		mapping.UpdatedAt.Unix(),
 	)
 
-	return err
+	if err != nil {
+		s.logger.Error("storage", "Failed to save user mapping", map[string]interface{}{
+			"source_driver":  mapping.SourceDriver,
+			"source_user_id": mapping.SourceUserID,
+			"target_driver":  mapping.TargetDriver,
+			"error":          err.Error(),
+		})
+		return fmt.Errorf("save user mapping: %w", err)
+	}
+
+	s.logger.Debug("storage", "User mapping saved", map[string]interface{}{
+		"source_driver":  mapping.SourceDriver,
+		"source_user_id": mapping.SourceUserID,
+		"target_driver":  mapping.TargetDriver,
+		"target_user_id": mapping.TargetUserID,
+		"display_name":   mapping.DisplayName,
+	})
+
+	return nil
 }
 
 // GetTargetUserID 查询目标平台的用户 ID
+// 参数：
+//   - sourceDriver: 来源驱动名称
+//   - sourceUserID: 来源用户 ID
+//   - targetDriver: 目标驱动名称
+//
+// 返回：
+//   - string: 目标用户 ID
+//   - bool: 是否找到映射
 func (s *UserMapStore) GetTargetUserID(sourceDriver, sourceUserID, targetDriver string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -117,6 +187,11 @@ func (s *UserMapStore) GetTargetUserID(sourceDriver, sourceUserID, targetDriver 
 
 	err := s.db.QueryRow(query, sourceDriver, sourceUserID, targetDriver).Scan(&targetUserID)
 	if err != nil {
+		s.logger.Debug("storage", "User mapping not found", map[string]interface{}{
+			"source_driver":  sourceDriver,
+			"source_user_id": sourceUserID,
+			"target_driver":  targetDriver,
+		})
 		return "", false
 	}
 
@@ -124,6 +199,14 @@ func (s *UserMapStore) GetTargetUserID(sourceDriver, sourceUserID, targetDriver 
 }
 
 // GetMapping 获取完整的用户映射信息
+// 参数：
+//   - sourceDriver: 来源驱动名称
+//   - sourceUserID: 来源用户 ID
+//   - targetDriver: 目标驱动名称
+//
+// 返回：
+//   - *UserMapping: 用户映射关系
+//   - bool: 是否找到映射
 func (s *UserMapStore) GetMapping(sourceDriver, sourceUserID, targetDriver string) (*UserMapping, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -150,6 +233,11 @@ func (s *UserMapStore) GetMapping(sourceDriver, sourceUserID, targetDriver strin
 	)
 
 	if err != nil {
+		s.logger.Debug("storage", "User mapping details not found", map[string]interface{}{
+			"source_driver":  sourceDriver,
+			"source_user_id": sourceUserID,
+			"target_driver":  targetDriver,
+		})
 		return nil, false
 	}
 
@@ -161,5 +249,6 @@ func (s *UserMapStore) GetMapping(sourceDriver, sourceUserID, targetDriver strin
 
 // Close 关闭数据库连接
 func (s *UserMapStore) Close() error {
+	s.logger.Info("storage", "Closing UserMapStore")
 	return s.db.Close()
 }

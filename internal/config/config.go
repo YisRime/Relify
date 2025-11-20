@@ -1,3 +1,5 @@
+// Package config 提供应用配置管理
+// 支持从 YAML 文件加载配置，包含数据库、驱动、日志等配置项
 package config
 
 import (
@@ -40,6 +42,12 @@ type LogConfig struct {
 }
 
 // LoadConfig 从文件加载配置
+// 参数：
+//   - path: 配置文件路径
+//
+// 返回：
+//   - *Config: 配置对象
+//   - error: 错误信息
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -58,6 +66,12 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 // SaveConfig 保存配置到文件
+// 参数：
+//   - path: 配置文件路径
+//   - cfg: 配置对象
+//
+// 返回：
+//   - error: 错误信息
 func SaveConfig(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -90,7 +104,9 @@ func setDefaults(cfg *Config) {
 	}
 }
 
-// Validate 验证配置
+// Validate 验证配置的有效性
+// 返回：
+//   - error: 验证错误信息
 func (c *Config) Validate() error {
 	// 验证日志级别
 	validLevels := map[string]bool{

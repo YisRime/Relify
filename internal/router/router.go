@@ -1,3 +1,5 @@
+// Package router 提供消息路由引擎
+// 负责消息分发、ID 翻译、提及转换等核心路由逻辑
 package router
 
 import (
@@ -20,7 +22,16 @@ type Router struct {
 	logger          *logger.Logger
 }
 
-// NewRouter 创建路由引擎
+// NewRouter 创建路由引擎实例
+// 参数：
+//   - driverRegistry: 驱动注册表
+//   - routeStore: 路由存储
+//   - messageMapStore: 消息映射存储
+//   - userMapStore: 用户映射存储
+//   - log: 日志记录器
+//
+// 返回：
+//   - *Router: 路由引擎实例
 func NewRouter(
 	driverRegistry *driver.Registry,
 	routeStore *storage.RouteStore,
@@ -38,8 +49,29 @@ func NewRouter(
 }
 
 // HandleMessage 处理入站消息（实现 InboundHandler 接口）
+// 参数：
+//   - ctx: 上下文对象
+//   - event: 消息事件
+//
+// 返回：
+//   - error: 处理错误
 func (r *Router) HandleMessage(ctx context.Context, event *model.MessageEvent) error {
+	if event == nil || event.Message == nil {
+		return fmt.Errorf("invalid message event: event or message is nil")
+	}
+
 	msg := event.Message
+
+	// 验证必要字段
+	if msg.SourceDriver == "" {
+		return fmt.Errorf("source_driver is required")
+	}
+	if msg.SourceRoomID == "" {
+		return fmt.Errorf("source_room_id is required")
+	}
+	if msg.SourceMsgID == "" {
+		return fmt.Errorf("source_msg_id is required")
+	}
 
 	r.logger.Debug("router", "Received message", map[string]interface{}{
 		"driver":  msg.SourceDriver,
@@ -79,6 +111,10 @@ func (r *Router) HandleMessage(ctx context.Context, event *model.MessageEvent) e
 }
 
 // routeToBinding 将消息路由到绑定的所有目标房间
+// 参数：
+//   - ctx: 上下文对象
+//   - msg: 原始消息
+//   - binding: 房间绑定关系
 func (r *Router) routeToBinding(ctx context.Context, msg *model.Message, binding *model.RoomBinding) {
 	// 为该绑定内的每个目标房间分发消息
 	for _, targetRoom := range binding.Rooms {
@@ -116,7 +152,15 @@ func (r *Router) routeToBinding(ctx context.Context, msg *model.Message, binding
 	}
 }
 
-// translateMessage ID 翻译：将引用 ID 转换为目标平台的消息 ID
+// translateMessage 翻译消息中的 ID 引用
+// 将来源平台的消息 ID 转换为目标平台的消息 ID
+// 参数：
+//   - msg: 原始消息
+//   - targetDriver: 目标驱动名称
+//   - binding: 房间绑定关系
+//
+// 返回：
+//   - *model.Message: 翻译后的消息
 func (r *Router) translateMessage(msg *model.Message, targetDriver string, binding *model.RoomBinding) *model.Message {
 	// 复制消息对象，避免修改原始消息
 	translated := *msg
@@ -177,6 +221,14 @@ func (r *Router) translateMessage(msg *model.Message, targetDriver string, bindi
 }
 
 // translateMentions 翻译提及信息
+// 将来源平台的用户 ID 转换为目标平台的用户 ID
+// 参数：
+//   - mentions: 原始提及列表
+//   - sourceDriver: 来源驱动名称
+//   - targetDriver: 目标驱动名称
+//
+// 返回：
+//   - []model.Mention: 翻译后的提及列表
 func (r *Router) translateMentions(mentions []model.Mention, sourceDriver, targetDriver string) []model.Mention {
 	translated := make([]model.Mention, len(mentions))
 
@@ -209,7 +261,13 @@ func (r *Router) translateMentions(mentions []model.Mention, sourceDriver, targe
 	return translated
 }
 
-// sendMessageAsync 异步发送消息（全链路异步）
+// sendMessageAsync 异步发送消息到目标平台
+// 在独立的 Goroutine 中执行，不阻塞主流程
+// 参数：
+//   - ctx: 上下文对象
+//   - targetDriver: 目标驱动
+//   - outbound: 出站消息
+//   - originalMsg: 原始消息（用于 ID 映射）
 func (r *Router) sendMessageAsync(ctx context.Context, targetDriver driver.Driver, outbound *model.OutboundMessage, originalMsg *model.Message) {
 	// 定义回调：记录 ID 映射
 	callback := func(result *model.MessageSendResult) {
@@ -260,7 +318,13 @@ func (r *Router) sendMessageAsync(ctx context.Context, targetDriver driver.Drive
 	}
 }
 
-// generateFingerprint 生成消息指纹（简单拼接，不加密）
+// generateFingerprint 生成消息指纹
+// 使用简单拼接方式生成唯一标识符，不进行加密
+// 参数：
+//   - msg: 消息对象
+//
+// 返回：
+//   - string: 消息指纹
 func (r *Router) generateFingerprint(msg *model.Message) string {
 	// 简单拼接：驱动:房间:消息ID:时间戳纳秒
 	return fmt.Sprintf("%s:%s:%s:%d",

@@ -1,3 +1,5 @@
+// Relify - 跨平台消息桥接系统
+// 基于六边形架构设计，支持 Telegram、Discord、Matrix 等多平台消息同步
 package main
 
 import (
@@ -16,18 +18,18 @@ import (
 )
 
 func main() {
-	// 命令行参数
+	// 解析命令行参数
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
 	flag.Parse()
 
-	// 加载配置
+	// 加载配置文件
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 验证配置
+	// 验证配置有效性
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid config: %v\n", err)
 		os.Exit(1)
@@ -57,7 +59,7 @@ func main() {
 	}
 
 	// TODO: 注册驱动（后续实现 Telegram、Discord、Matrix 驱动）
-	// 例如：
+	// 示例：
 	// telegramDriver := telegram.NewDriver(cfg.Drivers["telegram"])
 	// coreInst.RegisterDriver(telegramDriver)
 
@@ -71,14 +73,14 @@ func main() {
 	logger.Info("main", "Relify started successfully")
 	logger.Info("main", "Press Ctrl+C to stop")
 
-	// 优雅关闭
+	// 优雅关闭信号处理
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
 
 	logger.Info("main", "Shutting down...")
 
-	// 停止核心层
+	// 停止核心层（带超时）
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

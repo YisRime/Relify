@@ -1,3 +1,5 @@
+// Package storage 提供持久化存储功能
+// 包含消息映射、路由绑定、用户映射等存储实现
 package storage
 
 import (
@@ -6,13 +8,17 @@ import (
 	"sync"
 	"time"
 
+	"Relify/internal/logger"
+
 	_ "modernc.org/sqlite"
 )
 
-// MessageMapStore ID 映射存储
+// MessageMapStore 消息 ID 映射存储
+// 用于存储跨平台的消息 ID 映射关系，支持引用和编辑功能
 type MessageMapStore struct {
-	db *sql.DB
-	mu sync.RWMutex
+	db     *sql.DB
+	mu     sync.RWMutex
+	logger *logger.Logger
 }
 
 // MessageMapping 消息映射关系
@@ -24,17 +30,40 @@ type MessageMapping struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// NewMessageMapStore 创建映射存储实例
-func NewMessageMapStore(dbPath string) (*MessageMapStore, error) {
+// NewMessageMapStore 创建消息 ID 映射存储实例
+// 参数：
+//   - dbPath: SQLite 数据库文件路径
+//   - log: 日志记录器（如果为 nil，使用全局日志记录器）
+//
+// 返回：
+//   - *MessageMapStore: 映射存储实例
+//   - error: 错误信息
+func NewMessageMapStore(dbPath string, log *logger.Logger) (*MessageMapStore, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("database path cannot be empty")
+	}
+
 	db, err := sql.Open("sqlite", dbPath+"?_journal=WAL&_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	store := &MessageMapStore{db: db}
-	if err := store.initSchema(); err != nil {
-		return nil, err
+	// 如果未提供 logger，使用全局 logger
+	if log == nil {
+		log = logger.GetGlobal()
 	}
+
+	store := &MessageMapStore{
+		db:     db,
+		logger: log,
+	}
+
+	if err := store.initSchema(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("init schema: %w", err)
+	}
+
+	store.logger.Info("storage", "MessageMapStore initialized")
 
 	// 启动清理协程
 	go store.cleanupLoop()
@@ -62,8 +91,22 @@ func (s *MessageMapStore) initSchema() error {
 	return err
 }
 
-// Save 保存映射关系（异步安全）
+// Save 保存消息 ID 映射关系（并发安全）
+// 参数：
+//   - mapping: 消息映射关系
+//
+// 返回：
+//   - error: 错误信息
 func (s *MessageMapStore) Save(mapping *MessageMapping) error {
+	if mapping == nil {
+		return fmt.Errorf("mapping cannot be nil")
+	}
+
+	if mapping.SourceDriver == "" || mapping.SourceMsgID == "" ||
+		mapping.TargetDriver == "" || mapping.TargetMsgID == "" {
+		return fmt.Errorf("invalid mapping: all fields are required")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -81,10 +124,35 @@ func (s *MessageMapStore) Save(mapping *MessageMapping) error {
 		mapping.CreatedAt.Unix(),
 	)
 
-	return err
+	if err != nil {
+		s.logger.Error("storage", "Failed to save message mapping", map[string]interface{}{
+			"source_driver": mapping.SourceDriver,
+			"source_msg_id": mapping.SourceMsgID,
+			"target_driver": mapping.TargetDriver,
+			"error":         err.Error(),
+		})
+		return fmt.Errorf("save message mapping: %w", err)
+	}
+
+	s.logger.Debug("storage", "Message mapping saved", map[string]interface{}{
+		"source_driver": mapping.SourceDriver,
+		"source_msg_id": mapping.SourceMsgID,
+		"target_driver": mapping.TargetDriver,
+		"target_msg_id": mapping.TargetMsgID,
+	})
+
+	return nil
 }
 
-// GetTargetID 根据来源查找目标消息 ID
+// GetTargetID 根据来源消息查找目标平台的消息 ID
+// 参数：
+//   - sourceDriver: 来源驱动名称
+//   - sourceMsgID: 来源消息 ID
+//   - targetDriver: 目标驱动名称
+//
+// 返回：
+//   - string: 目标消息 ID
+//   - bool: 是否找到映射
 func (s *MessageMapStore) GetTargetID(sourceDriver, sourceMsgID, targetDriver string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -97,13 +165,25 @@ func (s *MessageMapStore) GetTargetID(sourceDriver, sourceMsgID, targetDriver st
 	var targetMsgID string
 	err := s.db.QueryRow(query, sourceDriver, sourceMsgID, targetDriver).Scan(&targetMsgID)
 	if err != nil {
+		s.logger.Debug("storage", "Message mapping not found", map[string]interface{}{
+			"source_driver": sourceDriver,
+			"source_msg_id": sourceMsgID,
+			"target_driver": targetDriver,
+		})
 		return "", false
 	}
 
 	return targetMsgID, true
 }
 
-// GetAllTargets 获取一条消息在所有平台的映射 ID
+// GetAllTargets 获取一条消息在所有目标平台的映射 ID
+// 参数：
+//   - sourceDriver: 来源驱动名称
+//   - sourceMsgID: 来源消息 ID
+//
+// 返回：
+//   - []MessageMapping: 所有映射关系列表
+//   - error: 错误信息
 func (s *MessageMapStore) GetAllTargets(sourceDriver, sourceMsgID string) ([]MessageMapping, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -116,6 +196,11 @@ func (s *MessageMapStore) GetAllTargets(sourceDriver, sourceMsgID string) ([]Mes
 
 	rows, err := s.db.Query(query, sourceDriver, sourceMsgID)
 	if err != nil {
+		s.logger.Error("storage", "Failed to query message mappings", map[string]interface{}{
+			"source_driver": sourceDriver,
+			"source_msg_id": sourceMsgID,
+			"error":         err.Error(),
+		})
 		return nil, err
 	}
 	defer rows.Close()
@@ -125,6 +210,9 @@ func (s *MessageMapStore) GetAllTargets(sourceDriver, sourceMsgID string) ([]Mes
 		var m MessageMapping
 		var createdAt int64
 		if err := rows.Scan(&m.SourceDriver, &m.SourceMsgID, &m.TargetDriver, &m.TargetMsgID, &createdAt); err != nil {
+			s.logger.Error("storage", "Failed to scan message mapping", map[string]interface{}{
+				"error": err.Error(),
+			})
 			return nil, err
 		}
 		m.CreatedAt = time.Unix(createdAt, 0)
@@ -144,7 +232,7 @@ func (s *MessageMapStore) cleanupLoop() {
 	}
 }
 
-// cleanup 清理过期数据
+// cleanup 清理过期数据（TTL: 48 小时）
 func (s *MessageMapStore) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -155,17 +243,21 @@ func (s *MessageMapStore) cleanup() {
 	query := `DELETE FROM message_mappings WHERE created_at < ?`
 	result, err := s.db.Exec(query, cutoff)
 	if err != nil {
-		// 日志记录错误（后续集成日志系统）
+		s.logger.Error("storage", "Failed to cleanup expired message mappings", map[string]interface{}{
+			"error": err.Error(),
+		})
 		return
 	}
 
 	if affected, _ := result.RowsAffected(); affected > 0 {
-		// 日志记录清理数量
-		_ = affected
+		s.logger.Info("storage", "Cleaned up expired message mappings", map[string]interface{}{
+			"count": affected,
+		})
 	}
 }
 
 // Close 关闭数据库连接
 func (s *MessageMapStore) Close() error {
+	s.logger.Info("storage", "Closing MessageMapStore")
 	return s.db.Close()
 }

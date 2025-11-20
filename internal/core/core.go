@@ -1,3 +1,5 @@
+// Package core 提供核心业务逻辑层
+// 六边形架构的应用核心，协调驱动、路由、存储等组件
 package core
 
 import (
@@ -29,6 +31,12 @@ type Config struct {
 }
 
 // NewCore 创建核心层实例
+// 参数：
+//   - cfg: 核心层配置
+//
+// 返回：
+//   - *Core: 核心层实例
+//   - error: 错误信息
 func NewCore(cfg *Config) (*Core, error) {
 	// 初始化日志系统
 	log, err := logger.NewFromConfig(
@@ -47,18 +55,21 @@ func NewCore(cfg *Config) (*Core, error) {
 	log.Info("core", "Initializing Relify core")
 
 	// 初始化存储
-	routeStore, err := storage.NewRouteStore(cfg.DatabasePath)
+	routeStore, err := storage.NewRouteStore(cfg.DatabasePath, log)
 	if err != nil {
 		return nil, fmt.Errorf("init route store: %w", err)
 	}
 
-	messageMapStore, err := storage.NewMessageMapStore(cfg.DatabasePath)
+	messageMapStore, err := storage.NewMessageMapStore(cfg.DatabasePath, log)
 	if err != nil {
+		routeStore.Close()
 		return nil, fmt.Errorf("init message map store: %w", err)
 	}
 
-	userMapStore, err := storage.NewUserMapStore(cfg.DatabasePath)
+	userMapStore, err := storage.NewUserMapStore(cfg.DatabasePath, log)
 	if err != nil {
+		routeStore.Close()
+		messageMapStore.Close()
 		return nil, fmt.Errorf("init user map store: %w", err)
 	}
 
@@ -81,17 +92,26 @@ func NewCore(cfg *Config) (*Core, error) {
 	}, nil
 }
 
-// RegisterDriver 注册驱动
+// RegisterDriver 注册平台驱动
+// 参数：
+//   - drv: 驱动实例
 func (c *Core) RegisterDriver(drv driver.Driver) {
 	c.driverRegistry.Register(drv)
 }
 
 // GetInboundHandler 获取入站处理器（供驱动调用）
+// 返回：
+//   - driver.InboundHandler: 入站处理器
 func (c *Core) GetInboundHandler() driver.InboundHandler {
 	return c.router
 }
 
 // Start 启动核心层及所有驱动
+// 参数：
+//   - ctx: 上下文对象
+//
+// 返回：
+//   - error: 启动错误
 func (c *Core) Start(ctx context.Context) error {
 	c.logger.Info("core", "Starting Relify")
 
@@ -119,6 +139,11 @@ func (c *Core) Start(ctx context.Context) error {
 }
 
 // Stop 停止核心层及所有驱动
+// 参数：
+//   - ctx: 上下文对象
+//
+// 返回：
+//   - error: 停止错误
 func (c *Core) Stop(ctx context.Context) error {
 	c.logger.Info("core", "Stopping Relify")
 

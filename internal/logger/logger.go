@@ -1,3 +1,5 @@
+// Package logger 提供统一的日志系统
+// 支持多种日志级别、格式（JSON/Text）和输出目标
 package logger
 
 import (

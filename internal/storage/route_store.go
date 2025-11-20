@@ -1,3 +1,5 @@
+// Package storage 提供持久化存储功能
+// 包含消息映射、路由绑定、用户映射等存储实现
 package storage
 
 import (
@@ -6,40 +8,66 @@ import (
 	"fmt"
 	"sync"
 
+	"Relify/internal/logger"
 	"Relify/internal/model"
 
 	_ "modernc.org/sqlite"
 )
 
 // RouteStore 路由绑定存储（常驻内存）
+// 提供高性能的路由查询，所有绑定关系加载到内存中
 type RouteStore struct {
 	db       *sql.DB
 	mu       sync.RWMutex
 	bindings map[string]*model.RoomBinding // key: binding_id
 	roomMap  map[string][]string           // key: "driver:room_id", value: []binding_id
+	logger   *logger.Logger
 }
 
 // NewRouteStore 创建路由存储实例
-func NewRouteStore(dbPath string) (*RouteStore, error) {
+// 参数：
+//   - dbPath: SQLite 数据库文件路径
+//   - log: 日志记录器（如果为 nil，使用全局日志记录器）
+//
+// 返回：
+//   - *RouteStore: 路由存储实例
+//   - error: 错误信息
+func NewRouteStore(dbPath string, log *logger.Logger) (*RouteStore, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("database path cannot be empty")
+	}
+
 	db, err := sql.Open("sqlite", dbPath+"?_journal=WAL&_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	// 如果未提供 logger，使用全局 logger
+	if log == nil {
+		log = logger.GetGlobal()
 	}
 
 	store := &RouteStore{
 		db:       db,
 		bindings: make(map[string]*model.RoomBinding),
 		roomMap:  make(map[string][]string),
+		logger:   log,
 	}
 
 	if err := store.initSchema(); err != nil {
-		return nil, err
+		db.Close()
+		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
 	// 启动时加载所有绑定到内存
 	if err := store.loadAll(); err != nil {
-		return nil, err
+		db.Close()
+		return nil, fmt.Errorf("load bindings: %w", err)
 	}
+
+	store.logger.Info("storage", "RouteStore initialized", map[string]interface{}{
+		"bindings_count": len(store.bindings),
+	})
 
 	return store, nil
 }
@@ -58,13 +86,16 @@ func (s *RouteStore) initSchema() error {
 	return err
 }
 
-// loadAll 加载所有绑定到内存
+// loadAll 从数据库加载所有绑定到内存
 func (s *RouteStore) loadAll() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	rows, err := s.db.Query("SELECT id, type, rooms_json FROM room_bindings")
 	if err != nil {
+		s.logger.Error("storage", "Failed to load route bindings", map[string]interface{}{
+			"error": err.Error(),
+		})
 		return err
 	}
 	defer rows.Close()
@@ -72,6 +103,9 @@ func (s *RouteStore) loadAll() error {
 	for rows.Next() {
 		var id, bindingType, roomsJSON string
 		if err := rows.Scan(&id, &bindingType, &roomsJSON); err != nil {
+			s.logger.Error("storage", "Failed to scan route binding", map[string]interface{}{
+				"error": err.Error(),
+			})
 			return err
 		}
 
@@ -81,6 +115,10 @@ func (s *RouteStore) loadAll() error {
 		}
 
 		if err := json.Unmarshal([]byte(roomsJSON), &binding.Rooms); err != nil {
+			s.logger.Error("storage", "Failed to unmarshal rooms JSON", map[string]interface{}{
+				"binding_id": id,
+				"error":      err.Error(),
+			})
 			return err
 		}
 
@@ -91,16 +129,53 @@ func (s *RouteStore) loadAll() error {
 			key := s.roomKey(room.Driver, room.RoomID)
 			s.roomMap[key] = append(s.roomMap[key], id)
 		}
+
+		s.logger.Debug("storage", "Loaded route binding", map[string]interface{}{
+			"binding_id": id,
+			"type":       bindingType,
+			"rooms":      len(binding.Rooms),
+		})
 	}
 
 	return rows.Err()
 }
 
-// SaveBinding 保存绑定关系
+// SaveBinding 保存绑定关系到数据库并更新内存
+// 参数：
+//   - binding: 房间绑定关系
+//
+// 返回：
+//   - error: 错误信息
 func (s *RouteStore) SaveBinding(binding *model.RoomBinding) error {
+	if binding == nil {
+		return fmt.Errorf("binding cannot be nil")
+	}
+
+	if binding.ID == "" {
+		return fmt.Errorf("binding ID cannot be empty")
+	}
+
+	if len(binding.Rooms) == 0 {
+		return fmt.Errorf("binding must have at least one room")
+	}
+
+	// 验证房间配置
+	for i, room := range binding.Rooms {
+		if room.Driver == "" {
+			return fmt.Errorf("room %d: driver cannot be empty", i)
+		}
+		if room.RoomID == "" {
+			return fmt.Errorf("room %d: room_id cannot be empty", i)
+		}
+	}
+
 	roomsJSON, err := json.Marshal(binding.Rooms)
 	if err != nil {
-		return err
+		s.logger.Error("storage", "Failed to marshal rooms JSON", map[string]interface{}{
+			"binding_id": binding.ID,
+			"error":      err.Error(),
+		})
+		return fmt.Errorf("marshal rooms JSON: %w", err)
 	}
 
 	query := `
@@ -112,7 +187,11 @@ func (s *RouteStore) SaveBinding(binding *model.RoomBinding) error {
 	defer s.mu.Unlock()
 
 	if _, err := s.db.Exec(query, binding.ID, string(binding.Type), string(roomsJSON)); err != nil {
-		return err
+		s.logger.Error("storage", "Failed to save route binding", map[string]interface{}{
+			"binding_id": binding.ID,
+			"error":      err.Error(),
+		})
+		return fmt.Errorf("save route binding: %w", err)
 	}
 
 	// 更新内存
@@ -126,10 +205,22 @@ func (s *RouteStore) SaveBinding(binding *model.RoomBinding) error {
 		}
 	}
 
+	s.logger.Info("storage", "Route binding saved", map[string]interface{}{
+		"binding_id": binding.ID,
+		"type":       binding.Type,
+		"rooms":      len(binding.Rooms),
+	})
+
 	return nil
 }
 
-// GetBinding 获取绑定关系（内存直接读取）
+// GetBinding 根据 ID 获取绑定关系（内存直接读取）
+// 参数：
+//   - id: 绑定 ID
+//
+// 返回：
+//   - *model.RoomBinding: 房间绑定关系
+//   - bool: 是否存在
 func (s *RouteStore) GetBinding(id string) (*model.RoomBinding, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -139,6 +230,12 @@ func (s *RouteStore) GetBinding(id string) (*model.RoomBinding, bool) {
 }
 
 // GetBindingsByRoom 根据房间查找所有相关绑定
+// 参数：
+//   - driver: 驱动名称
+//   - roomID: 房间 ID
+//
+// 返回：
+//   - []*model.RoomBinding: 绑定关系列表
 func (s *RouteStore) GetBindingsByRoom(driver, roomID string) []*model.RoomBinding {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -172,6 +269,11 @@ func (s *RouteStore) containsBinding(list []string, id string) bool {
 }
 
 // DeleteBinding 删除绑定关系
+// 参数：
+//   - id: 绑定 ID
+//
+// 返回：
+//   - error: 错误信息
 func (s *RouteStore) DeleteBinding(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -179,6 +281,10 @@ func (s *RouteStore) DeleteBinding(id string) error {
 	// 从数据库删除
 	query := `DELETE FROM room_bindings WHERE id = ?`
 	if _, err := s.db.Exec(query, id); err != nil {
+		s.logger.Error("storage", "Failed to delete route binding", map[string]interface{}{
+			"binding_id": id,
+			"error":      err.Error(),
+		})
 		return err
 	}
 
@@ -190,12 +296,18 @@ func (s *RouteStore) DeleteBinding(id string) error {
 			s.roomMap[key] = s.removeBinding(s.roomMap[key], id)
 		}
 		delete(s.bindings, id)
+
+		s.logger.Info("storage", "Route binding deleted", map[string]interface{}{
+			"binding_id": id,
+		})
 	}
 
 	return nil
 }
 
 // ListBindings 列出所有绑定关系
+// 返回：
+//   - []*model.RoomBinding: 所有绑定关系列表
 func (s *RouteStore) ListBindings() []*model.RoomBinding {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -221,5 +333,6 @@ func (s *RouteStore) removeBinding(list []string, id string) []string {
 
 // Close 关闭数据库连接
 func (s *RouteStore) Close() error {
+	s.logger.Info("storage", "Closing RouteStore")
 	return s.db.Close()
 }
