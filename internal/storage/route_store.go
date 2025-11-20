@@ -25,13 +25,6 @@ type RouteStore struct {
 }
 
 // NewRouteStore 创建路由存储实例
-// 参数：
-//   - dbPath: SQLite 数据库文件路径
-//   - log: 日志记录器（如果为 nil，使用全局日志记录器）
-//
-// 返回：
-//   - *RouteStore: 路由存储实例
-//   - error: 错误信息
 func NewRouteStore(dbPath string, log *logger.Logger) (*RouteStore, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("database path cannot be empty")
@@ -42,7 +35,6 @@ func NewRouteStore(dbPath string, log *logger.Logger) (*RouteStore, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	// 如果未提供 logger，使用全局 logger
 	if log == nil {
 		log = logger.GetGlobal()
 	}
@@ -59,13 +51,12 @@ func NewRouteStore(dbPath string, log *logger.Logger) (*RouteStore, error) {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
-	// 启动时加载所有绑定到内存
 	if err := store.loadAll(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("load bindings: %w", err)
 	}
 
-	store.logger.Info("storage", "RouteStore initialized", map[string]interface{}{
+	log.Info("storage", "RouteStore initialized", map[string]interface{}{
 		"bindings_count": len(store.bindings),
 	})
 
@@ -215,32 +206,19 @@ func (s *RouteStore) SaveBinding(binding *model.RoomBinding) error {
 }
 
 // GetBinding 根据 ID 获取绑定关系（内存直接读取）
-// 参数：
-//   - id: 绑定 ID
-//
-// 返回：
-//   - *model.RoomBinding: 房间绑定关系
-//   - bool: 是否存在
 func (s *RouteStore) GetBinding(id string) (*model.RoomBinding, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
 	binding, exists := s.bindings[id]
 	return binding, exists
 }
 
 // GetBindingsByRoom 根据房间查找所有相关绑定
-// 参数：
-//   - driver: 驱动名称
-//   - roomID: 房间 ID
-//
-// 返回：
-//   - []*model.RoomBinding: 绑定关系列表
 func (s *RouteStore) GetBindingsByRoom(driver, roomID string) []*model.RoomBinding {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	key := s.roomKey(driver, roomID)
+	key := driver + ":" + roomID
 	bindingIDs := s.roomMap[key]
 
 	bindings := make([]*model.RoomBinding, 0, len(bindingIDs))
@@ -249,7 +227,6 @@ func (s *RouteStore) GetBindingsByRoom(driver, roomID string) []*model.RoomBindi
 			bindings = append(bindings, binding)
 		}
 	}
-
 	return bindings
 }
 

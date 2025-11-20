@@ -32,13 +32,6 @@ type UserMapStore struct {
 }
 
 // NewUserMapStore 创建用户 ID 映射存储实例
-// 参数：
-//   - dbPath: SQLite 数据库文件路径
-//   - log: 日志记录器（如果为 nil，使用全局日志记录器）
-//
-// 返回：
-//   - *UserMapStore: 用户映射存储实例
-//   - error: 错误信息
 func NewUserMapStore(dbPath string, log *logger.Logger) (*UserMapStore, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("database path cannot be empty")
@@ -49,23 +42,18 @@ func NewUserMapStore(dbPath string, log *logger.Logger) (*UserMapStore, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	// 如果未提供 logger，使用全局 logger
 	if log == nil {
 		log = logger.GetGlobal()
 	}
 
-	store := &UserMapStore{
-		db:     db,
-		logger: log,
-	}
+	store := &UserMapStore{db: db, logger: log}
 
 	if err := store.initSchema(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
-	store.logger.Info("storage", "UserMapStore initialized")
-
+	log.Info("storage", "UserMapStore initialized")
 	return store, nil
 }
 
@@ -166,36 +154,16 @@ func (s *UserMapStore) Save(mapping *UserMapping) error {
 }
 
 // GetTargetUserID 查询目标平台的用户 ID
-// 参数：
-//   - sourceDriver: 来源驱动名称
-//   - sourceUserID: 来源用户 ID
-//   - targetDriver: 目标驱动名称
-//
-// 返回：
-//   - string: 目标用户 ID
-//   - bool: 是否找到映射
 func (s *UserMapStore) GetTargetUserID(sourceDriver, sourceUserID, targetDriver string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var targetUserID string
-	query := `
-		SELECT target_user_id 
-		FROM user_mappings 
-		WHERE source_driver = ? AND source_user_id = ? AND target_driver = ?
-	`
+	query := `SELECT target_user_id FROM user_mappings 
+		WHERE source_driver = ? AND source_user_id = ? AND target_driver = ?`
 
 	err := s.db.QueryRow(query, sourceDriver, sourceUserID, targetDriver).Scan(&targetUserID)
-	if err != nil {
-		s.logger.Debug("storage", "User mapping not found", map[string]interface{}{
-			"source_driver":  sourceDriver,
-			"source_user_id": sourceUserID,
-			"target_driver":  targetDriver,
-		})
-		return "", false
-	}
-
-	return targetUserID, true
+	return targetUserID, err == nil
 }
 
 // GetMapping 获取完整的用户映射信息

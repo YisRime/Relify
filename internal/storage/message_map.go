@@ -31,13 +31,6 @@ type MessageMapping struct {
 }
 
 // NewMessageMapStore 创建消息 ID 映射存储实例
-// 参数：
-//   - dbPath: SQLite 数据库文件路径
-//   - log: 日志记录器（如果为 nil，使用全局日志记录器）
-//
-// 返回：
-//   - *MessageMapStore: 映射存储实例
-//   - error: 错误信息
 func NewMessageMapStore(dbPath string, log *logger.Logger) (*MessageMapStore, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("database path cannot be empty")
@@ -48,24 +41,18 @@ func NewMessageMapStore(dbPath string, log *logger.Logger) (*MessageMapStore, er
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	// 如果未提供 logger，使用全局 logger
 	if log == nil {
 		log = logger.GetGlobal()
 	}
 
-	store := &MessageMapStore{
-		db:     db,
-		logger: log,
-	}
+	store := &MessageMapStore{db: db, logger: log}
 
 	if err := store.initSchema(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
-	store.logger.Info("storage", "MessageMapStore initialized")
-
-	// 启动清理协程
+	log.Info("storage", "MessageMapStore initialized")
 	go store.cleanupLoop()
 
 	return store, nil
@@ -91,17 +78,11 @@ func (s *MessageMapStore) initSchema() error {
 	return err
 }
 
-// Save 保存消息 ID 映射关系（并发安全）
-// 参数：
-//   - mapping: 消息映射关系
-//
-// 返回：
-//   - error: 错误信息
+// Save 保存消息 ID 映射关系
 func (s *MessageMapStore) Save(mapping *MessageMapping) error {
 	if mapping == nil {
 		return fmt.Errorf("mapping cannot be nil")
 	}
-
 	if mapping.SourceDriver == "" || mapping.SourceMsgID == "" ||
 		mapping.TargetDriver == "" || mapping.TargetMsgID == "" {
 		return fmt.Errorf("invalid mapping: all fields are required")
@@ -110,70 +91,30 @@ func (s *MessageMapStore) Save(mapping *MessageMapping) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	query := `
-		INSERT OR REPLACE INTO message_mappings 
+	query := `INSERT OR REPLACE INTO message_mappings 
 		(source_driver, source_msg_id, target_driver, target_msg_id, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`
+		VALUES (?, ?, ?, ?, ?)`
 
-	_, err := s.db.Exec(query,
-		mapping.SourceDriver,
-		mapping.SourceMsgID,
-		mapping.TargetDriver,
-		mapping.TargetMsgID,
-		mapping.CreatedAt.Unix(),
-	)
-
+	_, err := s.db.Exec(query, mapping.SourceDriver, mapping.SourceMsgID,
+		mapping.TargetDriver, mapping.TargetMsgID, mapping.CreatedAt.Unix())
 	if err != nil {
-		s.logger.Error("storage", "Failed to save message mapping", map[string]interface{}{
-			"source_driver": mapping.SourceDriver,
-			"source_msg_id": mapping.SourceMsgID,
-			"target_driver": mapping.TargetDriver,
-			"error":         err.Error(),
-		})
 		return fmt.Errorf("save message mapping: %w", err)
 	}
-
-	s.logger.Debug("storage", "Message mapping saved", map[string]interface{}{
-		"source_driver": mapping.SourceDriver,
-		"source_msg_id": mapping.SourceMsgID,
-		"target_driver": mapping.TargetDriver,
-		"target_msg_id": mapping.TargetMsgID,
-	})
 
 	return nil
 }
 
 // GetTargetID 根据来源消息查找目标平台的消息 ID
-// 参数：
-//   - sourceDriver: 来源驱动名称
-//   - sourceMsgID: 来源消息 ID
-//   - targetDriver: 目标驱动名称
-//
-// 返回：
-//   - string: 目标消息 ID
-//   - bool: 是否找到映射
 func (s *MessageMapStore) GetTargetID(sourceDriver, sourceMsgID, targetDriver string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `
-		SELECT target_msg_id FROM message_mappings
-		WHERE source_driver = ? AND source_msg_id = ? AND target_driver = ?
-	`
-
 	var targetMsgID string
-	err := s.db.QueryRow(query, sourceDriver, sourceMsgID, targetDriver).Scan(&targetMsgID)
-	if err != nil {
-		s.logger.Debug("storage", "Message mapping not found", map[string]interface{}{
-			"source_driver": sourceDriver,
-			"source_msg_id": sourceMsgID,
-			"target_driver": targetDriver,
-		})
-		return "", false
-	}
+	query := `SELECT target_msg_id FROM message_mappings
+		WHERE source_driver = ? AND source_msg_id = ? AND target_driver = ?`
 
-	return targetMsgID, true
+	err := s.db.QueryRow(query, sourceDriver, sourceMsgID, targetDriver).Scan(&targetMsgID)
+	return targetMsgID, err == nil
 }
 
 // GetAllTargets 获取一条消息在所有目标平台的映射 ID

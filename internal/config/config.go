@@ -42,12 +42,6 @@ type LogConfig struct {
 }
 
 // LoadConfig 从文件加载配置
-// 参数：
-//   - path: 配置文件路径
-//
-// 返回：
-//   - *Config: 配置对象
-//   - error: 错误信息
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -59,30 +53,17 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	// 设置默认值
 	setDefaults(&cfg)
-
 	return &cfg, nil
 }
 
 // SaveConfig 保存配置到文件
-// 参数：
-//   - path: 配置文件路径
-//   - cfg: 配置对象
-//
-// 返回：
-//   - error: 错误信息
 func SaveConfig(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write config file: %w", err)
-	}
-
-	return nil
+	return os.WriteFile(path, data, 0644)
 }
 
 // setDefaults 设置默认配置值
@@ -105,35 +86,18 @@ func setDefaults(cfg *Config) {
 }
 
 // Validate 验证配置的有效性
-// 返回：
-//   - error: 验证错误信息
 func (c *Config) Validate() error {
-	// 验证日志级别
-	validLevels := map[string]bool{
-		"debug": true,
-		"info":  true,
-		"warn":  true,
-		"error": true,
-	}
+	validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
 	if !validLevels[c.Log.Level] {
 		return fmt.Errorf("invalid log level: %s", c.Log.Level)
 	}
 
-	// 验证日志格式
-	validFormats := map[string]bool{
-		"json": true,
-		"text": true,
-	}
+	validFormats := map[string]bool{"json": true, "text": true}
 	if !validFormats[c.Log.Format] {
 		return fmt.Errorf("invalid log format: %s", c.Log.Format)
 	}
 
-	// 验证日志输出
-	validOutputs := map[string]bool{
-		"stdout": true,
-		"stderr": true,
-		"file":   true,
-	}
+	validOutputs := map[string]bool{"stdout": true, "stderr": true, "file": true}
 	if !validOutputs[c.Log.Output] {
 		return fmt.Errorf("invalid log output: %s", c.Log.Output)
 	}
