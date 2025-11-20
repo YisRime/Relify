@@ -7,17 +7,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
 type Store struct {
-	db           *sql.DB
-	bindingCache map[string]*RoomBinding
-	roomIndex    map[string][]string
-	mu           sync.RWMutex
-	logger       *Logger
-	closeOnce    sync.Once
-	done         chan struct{}
+	db     *sql.DB
+	logger *Logger
+
+	bindingCache sync.Map
+
+	closeOnce sync.Once
+	done      chan struct{}
 }
 
 func NewStore(dbPath string, log *Logger) (*Store, error) {
@@ -27,23 +28,17 @@ func NewStore(dbPath string, log *Logger) (*Store, error) {
 		return nil, err
 	}
 
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(20)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(1 * time.Hour)
 
 	s := &Store{
-		db:           db,
-		logger:       log,
-		bindingCache: make(map[string]*RoomBinding),
-		roomIndex:    make(map[string][]string),
-		done:         make(chan struct{}),
+		db:     db,
+		logger: log,
+		done:   make(chan struct{}),
 	}
 
 	if err := s.initSchema(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-
-	if err := s.loadCache(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -53,9 +48,7 @@ func NewStore(dbPath string, log *Logger) (*Store, error) {
 }
 
 func (s *Store) Close() error {
-	s.closeOnce.Do(func() {
-		close(s.done)
-	})
+	s.closeOnce.Do(func() { close(s.done) })
 	return s.db.Close()
 }
 
@@ -70,83 +63,131 @@ func (s *Store) initSchema() error {
 			binding_id TEXT, created_at INTEGER,
 			PRIMARY KEY (source_plat, source_msg, target_plat)
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_mapping_echo ON message_mappings(target_plat, target_msg);`,
+		`CREATE INDEX IF NOT EXISTS idx_mapping_cleanup ON message_mappings(created_at);`,
 		`CREATE TABLE IF NOT EXISTS users (platform TEXT, user_id TEXT, display_name TEXT, avatar_url TEXT, updated_at INTEGER, PRIMARY KEY (platform, user_id));`,
 	}
 
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	for _, q := range queries {
-		if _, err := s.db.Exec(q); err != nil {
+		if _, err := tx.Exec(q); err != nil {
 			return fmt.Errorf("schema error: %w", err)
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
-func (s *Store) loadCache() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) GetBindingsByRoom(platform, roomID string) []*RoomBinding {
+	key := platform + ":" + roomID
 
-	bRows, err := s.db.Query("SELECT id, name FROM bindings")
-	if err != nil {
-		return err
+	if val, ok := s.bindingCache.Load(key); ok {
+		return val.([]*RoomBinding)
 	}
-	defer bRows.Close()
 
-	for bRows.Next() {
-		var b RoomBinding
-		if err := bRows.Scan(&b.ID, &b.Name); err != nil {
-			continue
+	bindings, err := s.loadBindingsFromDB(platform, roomID)
+	if err != nil {
+		s.logger.Log(ErrorLevel, "store", "load bindings failed", map[string]interface{}{"err": err.Error()})
+		return nil
+	}
+
+	s.bindingCache.Store(key, bindings)
+	return bindings
+}
+
+func (s *Store) loadBindingsFromDB(platform, roomID string) ([]*RoomBinding, error) {
+	rows, err := s.db.Query("SELECT binding_id FROM binding_rooms WHERE platform=? AND room_id=?", platform, roomID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var bindingIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			bindingIDs = append(bindingIDs, id)
 		}
-		s.bindingCache[b.ID] = &b
 	}
 
-	rRows, err := s.db.Query("SELECT binding_id, platform, room_id, config_json FROM binding_rooms")
+	if len(bindingIDs) == 0 {
+		return []*RoomBinding{}, nil
+	}
+
+	var result []*RoomBinding
+	for _, bid := range bindingIDs {
+		b, err := s.GetBindingByID(bid)
+		if err == nil && b != nil {
+			result = append(result, b)
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) GetBindingByID(id string) (*RoomBinding, error) {
+	var b RoomBinding
+	err := s.db.QueryRow("SELECT id, name FROM bindings WHERE id=?", id).Scan(&b.ID, &b.Name)
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	rRows, err := s.db.Query("SELECT platform, room_id, config_json FROM binding_rooms WHERE binding_id=?", id)
+	if err != nil {
+		return nil, err
 	}
 	defer rRows.Close()
 
 	for rRows.Next() {
-		var bid, plat, rid, cfgStr string
-		if err := rRows.Scan(&bid, &plat, &rid, &cfgStr); err != nil {
-			continue
-		}
-
-		if binding, exists := s.bindingCache[bid]; exists {
+		var plat, rid, cfgStr string
+		if err := rRows.Scan(&plat, &rid, &cfgStr); err == nil {
 			var cfg map[string]interface{}
 			_ = json.Unmarshal([]byte(cfgStr), &cfg)
-
-			binding.Rooms = append(binding.Rooms, BoundRoom{
-				Platform: plat,
-				RoomID:   rid,
-				Config:   cfg,
-			})
-
-			key := plat + ":" + rid
-			s.roomIndex[key] = append(s.roomIndex[key], bid)
+			b.Rooms = append(b.Rooms, BoundRoom{Platform: plat, RoomID: rid, Config: cfg})
 		}
 	}
-	return nil
+	return &b, nil
 }
 
-func (s *Store) GetBindingsByRoom(platform, roomID string) []*RoomBinding {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *Store) CreateDynamicBinding(name string, rooms []BoundRoom) (*RoomBinding, error) {
+	id := uuid.New().String()
 
-	ids := s.roomIndex[platform+":"+roomID]
-	result := make([]*RoomBinding, 0, len(ids))
-	for _, id := range ids {
-		if b, ok := s.bindingCache[id]; ok {
-			result = append(result, b)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("INSERT INTO bindings (id, name, created_at) VALUES (?, ?, ?)", id, name, time.Now().Unix()); err != nil {
+		return nil, err
+	}
+
+	for _, r := range rooms {
+		cfgBytes, _ := json.Marshal(r.Config)
+		if _, err := tx.Exec("INSERT INTO binding_rooms (binding_id, platform, room_id, config_json) VALUES (?, ?, ?, ?)",
+			id, r.Platform, r.RoomID, string(cfgBytes)); err != nil {
+			return nil, err
 		}
 	}
-	return result
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	binding := &RoomBinding{ID: id, Name: name, Rooms: rooms}
+
+	for _, r := range rooms {
+		s.bindingCache.Delete(r.Platform + ":" + r.RoomID)
+	}
+
+	return binding, nil
 }
 
 func (s *Store) IsEventEcho(platform, msgID string) bool {
 	var dummy int
-	err := s.db.QueryRow("SELECT 1 FROM message_mappings WHERE target_plat=? AND target_msg=? LIMIT 1", platform, msgID).Scan(&dummy)
-	return err == nil
+	return s.db.QueryRow("SELECT 1 FROM message_mappings WHERE target_plat=? AND target_msg=? LIMIT 1", platform, msgID).Scan(&dummy) == nil
 }
 
 func (s *Store) GetTargetMessageID(srcPlat, srcMsg, tgtPlat string) (string, bool) {
@@ -162,7 +203,7 @@ func (s *Store) SaveMessageMapping(srcPlat, srcMsg, tgtPlat, tgtMsg, bindID stri
 			srcPlat, srcMsg, tgtPlat, tgtMsg, bindID, time.Now().Unix(),
 		)
 		if err != nil {
-			s.logger.Log(WarnLevel, "store", "failed to save mapping", map[string]interface{}{"err": err.Error()})
+			s.logger.Log(WarnLevel, "store", "mapping save failed", map[string]interface{}{"err": err.Error()})
 		}
 	}()
 }
@@ -177,7 +218,7 @@ func (s *Store) UpdateUserCache(platform, userID, name, avatar string) {
 }
 
 func (s *Store) cleanupLoop() {
-	ticker := time.NewTicker(6 * time.Hour)
+	ticker := time.NewTicker(12 * time.Hour)
 	defer ticker.Stop()
 
 	for {

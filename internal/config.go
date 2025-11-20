@@ -12,6 +12,7 @@ type Config struct {
 	LogLevel    string                    `yaml:"log_level"`
 	Mode        string                    `yaml:"mode"`
 	HubPlatform string                    `yaml:"hub_platform"`
+	HubRoomID   string                    `yaml:"hub_room_id"`
 	Platforms   map[string]PlatformConfig `yaml:"platforms"`
 }
 
@@ -26,22 +27,18 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	cfg := GenerateDefault()
+	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
-	if cfg.DataDir == "" {
-		cfg.DataDir = "./data"
-	}
-	if cfg.LogLevel == "" {
-		cfg.LogLevel = "info"
-	}
-	return &cfg, nil
+	return cfg, nil
 }
 
 func (c *Config) Validate() error {
-	if c.Mode == "hub" && c.HubPlatform == "" {
-		return fmt.Errorf("hub mode requires hub_platform")
+	if c.Mode == "hub" {
+		if c.HubPlatform == "" || c.HubRoomID == "" {
+			return fmt.Errorf("hub mode requires hub_platform and hub_room_id")
+		}
 	}
 	return nil
 }
@@ -60,7 +57,7 @@ func GenerateDefault() *Config {
 		LogLevel: "info",
 		Mode:     "peer",
 		Platforms: map[string]PlatformConfig{
-			"example": {Type: "discord", Enabled: false},
+			"discord_example": {Type: "discord", Enabled: false},
 		},
 	}
 }

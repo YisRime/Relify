@@ -82,8 +82,9 @@ type EmbedField struct {
 }
 
 type OutboundMessage struct {
-	TargetPlatform  string   `json:"target_platform"`
-	TargetRoomID    string   `json:"target_room_id"`
+	TargetPlatform  string `json:"target_platform"`
+	TargetRoomID    string `json:"target_room_id"`
+	TargetConfig    map[string]interface{}
 	TargetMessageID string   `json:"target_message_id,omitempty"`
 	Message         *Message `json:"message"`
 }
@@ -105,10 +106,13 @@ type Platform interface {
 	GetBotUserID() string
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
+
 	SendMessage(ctx context.Context, msg *OutboundMessage) (string, error)
 	EditMessage(ctx context.Context, msg *OutboundMessage) error
 	DeleteMessage(ctx context.Context, roomID, msgID string) error
 	UploadFile(ctx context.Context, data []byte, filename string) (string, error)
+
+	CreateRoom(ctx context.Context, name string) (string, error)
 }
 
 type InboundHandler interface {

@@ -10,19 +10,21 @@ import (
 )
 
 type Router struct {
+	config     *Config
 	registry   *PlatformRegistry
 	store      *Store
 	logger     *Logger
 	httpClient *http.Client
 }
 
-func NewRouter(reg *PlatformRegistry, store *Store, log *Logger) *Router {
+func NewRouter(cfg *Config, reg *PlatformRegistry, store *Store, log *Logger) *Router {
 	return &Router{
+		config:   cfg,
 		registry: reg,
 		store:    store,
 		logger:   log,
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: 30 * time.Second,
 		},
 	}
 }
@@ -39,15 +41,27 @@ func (r *Router) HandleEvent(ctx context.Context, event *Event) error {
 	}
 
 	if r.store.IsEventEcho(event.Platform, event.Message.ID) {
-		r.logger.Log(DebugLevel, "router", "ignored echo message", map[string]interface{}{
-			"id": event.Message.ID,
-		})
 		return nil
 	}
 
 	r.store.UpdateUserCache(event.Platform, event.Message.SenderID, event.Message.SenderName, event.Message.SenderAvatar)
 
 	bindings := r.store.GetBindingsByRoom(event.Platform, event.Message.RoomID)
+
+	if len(bindings) == 0 {
+		var err error
+		if r.config.Mode == "hub" {
+			bindings, err = r.ensureHubBinding(ctx, event)
+		} else {
+			bindings, err = r.ensurePeerBinding(ctx, event)
+		}
+
+		if err != nil {
+			r.logger.Log(ErrorLevel, "router", "auto-binding failed", map[string]interface{}{"err": err.Error()})
+			return nil
+		}
+	}
+
 	if len(bindings) == 0 {
 		return nil
 	}
@@ -75,8 +89,108 @@ func (r *Router) HandleEvent(ctx context.Context, event *Event) error {
 	return nil
 }
 
+func (r *Router) ensureHubBinding(ctx context.Context, event *Event) ([]*RoomBinding, error) {
+	hubPlatName := r.config.HubPlatform
+	fallbackRoomID := r.config.HubRoomID
+
+	if event.Platform == hubPlatName {
+		return nil, nil
+	}
+
+	hubAdapter, ok := r.registry.Get(hubPlatName)
+	if !ok {
+		return nil, fmt.Errorf("hub platform %s not active", hubPlatName)
+	}
+
+	var targetRoomID string
+	var usedFallback bool
+
+	newRoomName := fmt.Sprintf("%s-%s", event.Platform, event.Message.RoomID)
+	createdID, err := hubAdapter.CreateRoom(ctx, newRoomName)
+
+	if err == nil {
+		targetRoomID = createdID
+	} else {
+		if fallbackRoomID != "" {
+			r.logger.Log(WarnLevel, "router", "hub create failed, using fallback", map[string]interface{}{"err": err.Error()})
+			targetRoomID = fallbackRoomID
+			usedFallback = true
+		} else {
+			return nil, fmt.Errorf("hub room creation failed: %w", err)
+		}
+	}
+
+	bindingName := fmt.Sprintf("Auto-Hub: %s/%s", event.Platform, event.Message.RoomID)
+	if usedFallback {
+		bindingName += " (Fallback)"
+	}
+
+	rooms := []BoundRoom{
+		{Platform: event.Platform, RoomID: event.Message.RoomID},
+		{Platform: hubPlatName, RoomID: targetRoomID},
+	}
+
+	r.logger.Log(InfoLevel, "router", "created hub binding", map[string]interface{}{"name": bindingName})
+	b, err := r.store.CreateDynamicBinding(bindingName, rooms)
+	if err != nil {
+		return nil, err
+	}
+	return []*RoomBinding{b}, nil
+}
+
+func (r *Router) ensurePeerBinding(ctx context.Context, event *Event) ([]*RoomBinding, error) {
+	allPlats := r.registry.All()
+
+	if len(allPlats) <= 1 {
+		return nil, nil
+	}
+
+	rooms := []BoundRoom{
+		{Platform: event.Platform, RoomID: event.Message.RoomID},
+	}
+
+	targetRoomName := fmt.Sprintf("%s-%s", event.Platform, event.Message.RoomID)
+
+	createdCount := 0
+
+	for name, adapter := range allPlats {
+		if name == event.Platform {
+			continue
+		}
+
+		targetID, err := adapter.CreateRoom(ctx, targetRoomName)
+		if err != nil {
+			r.logger.Log(WarnLevel, "router", "peer create failed", map[string]interface{}{
+				"plat": name,
+				"err":  err.Error(),
+			})
+			continue
+		}
+
+		rooms = append(rooms, BoundRoom{Platform: name, RoomID: targetID})
+		createdCount++
+	}
+
+	if createdCount == 0 {
+		return nil, fmt.Errorf("failed to create counterpart rooms on any other platform")
+	}
+
+	bindingName := fmt.Sprintf("Auto-Peer: %s/%s (%d targets)", event.Platform, event.Message.RoomID, createdCount)
+
+	r.logger.Log(InfoLevel, "router", "created peer binding", map[string]interface{}{
+		"name":    bindingName,
+		"targets": createdCount,
+	})
+
+	b, err := r.store.CreateDynamicBinding(bindingName, rooms)
+	if err != nil {
+		return nil, err
+	}
+	return []*RoomBinding{b}, nil
+}
+
 func (r *Router) processRoute(ctx context.Context, adapter Platform, event *Event, tRoom BoundRoom, bindID string) {
-	routeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	routeCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	var err error
@@ -90,10 +204,10 @@ func (r *Router) processRoute(ctx context.Context, adapter Platform, event *Even
 	}
 
 	if err != nil {
-		r.logger.Log(ErrorLevel, "router", "delivery failed", map[string]interface{}{
-			"action": event.Action,
-			"target": tRoom.Platform,
-			"error":  err.Error(),
+		r.logger.Log(WarnLevel, "router", "delivery failed", map[string]interface{}{
+			"to_plat": tRoom.Platform,
+			"to_room": tRoom.RoomID,
+			"err":     err.Error(),
 		})
 	}
 }
@@ -118,10 +232,11 @@ func (r *Router) handleCreate(ctx context.Context, adapter Platform, event *Even
 	payload := &OutboundMessage{
 		TargetPlatform: tRoom.Platform,
 		TargetRoomID:   tRoom.RoomID,
+		TargetConfig:   tRoom.Config,
 		Message:        outMsg,
 	}
 
-	newID, err := r.sendWithRetry(ctx, adapter, payload)
+	newID, err := adapter.SendMessage(ctx, payload)
 	if err != nil {
 		return err
 	}
@@ -135,7 +250,7 @@ func (r *Router) handleCreate(ctx context.Context, adapter Platform, event *Even
 func (r *Router) handleUpdate(ctx context.Context, adapter Platform, event *Event, tRoom BoundRoom) error {
 	tgtMsgID, found := r.store.GetTargetMessageID(event.Platform, event.Message.ID, tRoom.Platform)
 	if !found {
-		return fmt.Errorf("target message not found")
+		return nil
 	}
 
 	outMsg := r.constructOutboundPayload(event.Message)
@@ -158,75 +273,41 @@ func (r *Router) handleDelete(ctx context.Context, adapter Platform, event *Even
 }
 
 func (r *Router) constructOutboundPayload(src *Message) *Message {
-	dst := &Message{
-		SenderID:     src.SenderID,
-		SenderName:   src.SenderName,
-		SenderAvatar: src.SenderAvatar,
-		Content:      src.Content,
-		ReplyToID:    src.ReplyToID,
-		Extra:        src.Extra,
-	}
-
-	if len(src.Mentions) > 0 {
+	dst := *src
+	if src.Mentions != nil {
 		dst.Mentions = make([]string, len(src.Mentions))
 		copy(dst.Mentions, src.Mentions)
 	}
-
-	if len(src.Files) > 0 {
+	if src.Files != nil {
 		dst.Files = make([]*File, len(src.Files))
 		for i, f := range src.Files {
 			val := *f
 			dst.Files[i] = &val
 		}
 	}
-
-	if len(src.Embeds) > 0 {
-		dst.Embeds = make([]*Embed, len(src.Embeds))
-		for i, e := range src.Embeds {
-			if e == nil {
-				continue
-			}
-			v := *e
-			if e.Image != nil {
-				img := *e.Image
-				v.Image = &img
-			}
-			if e.Thumbnail != nil {
-				thm := *e.Thumbnail
-				v.Thumbnail = &thm
-			}
-			if len(e.Fields) > 0 {
-				v.Fields = make([]*EmbedField, len(e.Fields))
-				for j, f := range e.Fields {
-					if f != nil {
-						fv := *f
-						v.Fields[j] = &fv
-					}
-				}
-			}
-			dst.Embeds[i] = &v
-		}
-	}
-
-	return dst
+	return &dst
 }
 
 func (r *Router) rehostFiles(ctx context.Context, adapter Platform, msg *Message) error {
+	n := 0
 	for _, file := range msg.Files {
 		data, err := r.downloadFile(ctx, file.URL)
 		if err != nil {
-			r.logger.Log(WarnLevel, "router", "download failed, skipping file", map[string]interface{}{"url": file.URL})
+			r.logger.Log(WarnLevel, "router", "dl failed", map[string]interface{}{"url": file.URL, "err": err.Error()})
 			continue
 		}
 
 		newURL, err := adapter.UploadFile(ctx, data, file.Name)
 		if err != nil {
-			r.logger.Log(WarnLevel, "router", "upload failed", map[string]interface{}{"plat": adapter.Name()})
+			r.logger.Log(WarnLevel, "router", "ul failed", map[string]interface{}{"plat": adapter.Name(), "err": err.Error()})
 			continue
 		}
 
 		file.URL = newURL
+		msg.Files[n] = file
+		n++
 	}
+	msg.Files = msg.Files[:n]
 	return nil
 }
 
@@ -243,30 +324,16 @@ func (r *Router) downloadFile(ctx context.Context, url string) ([]byte, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status code %d", resp.StatusCode)
+		return nil, fmt.Errorf("http status %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
-}
-
-func (r *Router) sendWithRetry(ctx context.Context, adapter Platform, msg *OutboundMessage) (string, error) {
-	const maxRetries = 3
-	var lastErr error
-
-	for i := 0; i <= maxRetries; i++ {
-		if i > 0 {
-			select {
-			case <-ctx.Done():
-				return "", ctx.Err()
-			case <-time.After(time.Duration(1<<i) * time.Second):
-			}
-		}
-
-		id, err := adapter.SendMessage(ctx, msg)
-		if err == nil {
-			return id, nil
-		}
-		lastErr = err
+	const maxLimit = 16 * 1024 * 1024
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxLimit+1))
+	if err != nil {
+		return nil, err
 	}
-	return "", fmt.Errorf("retry exhausted: %w", lastErr)
+	if len(data) > maxLimit {
+		return nil, fmt.Errorf("file too large")
+	}
+	return data, nil
 }
