@@ -99,7 +99,10 @@ type MediaInfo struct {
 
 // MessageEvent 消息事件（驱动到核心层的入站接口）
 type MessageEvent struct {
-	Message *Message `json:"message"`
+	Message    *Message  `json:"message"`               // 消息内容
+	EventType  string    `json:"event_type"`            // 事件类型："new", "edit", "delete"
+	Timestamp  time.Time `json:"timestamp"`             // 事件时间戳
+	RetryCount int       `json:"retry_count,omitempty"` // 重试次数（用于幂等性控制）
 }
 
 // OutboundMessage 出站消息（核心层到驱动的出站接口）
