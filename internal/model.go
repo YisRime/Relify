@@ -1,4 +1,3 @@
-// Package internal 定义核心数据模型和接口
 package internal
 
 import (
@@ -6,90 +5,80 @@ import (
 	"time"
 )
 
-// RouteType 路由类型 (平台固有属性)
+// --- Enums ---
+
 type RouteType string
 
 const (
-	// RouteTypeMirror 镜像模式：机器人有权限创建频道/房间，可以完全复刻源结构 (e.g. Discord, Slack)
-	RouteTypeMirror RouteType = "mirror"
-	// RouteTypeAggregate 聚合模式：机器人无法创建房间，只能被拉入现有群组 (e.g. WeChat, WhatsApp, TG Personal)
-	RouteTypeAggregate RouteType = "aggregate"
+	RouteTypeMirror    RouteType = "mirror"    // 镜像模式 (如 Discord, Slack)
+	RouteTypeAggregate RouteType = "aggregate" // 聚合模式 (如 WeChat, WhatsApp)
 )
 
-// MessageType 消息类型枚举
 type MessageType string
 
 const (
-	MsgTypeText    MessageType = "text"    // 纯文本或Markdown
-	MsgTypeRich    MessageType = "rich"    // 富文本 (HTML, Embeds, Cards)
-	MsgTypeImage   MessageType = "image"   // 图片
-	MsgTypeAudio   MessageType = "audio"   // 音频
-	MsgTypeVideo   MessageType = "video"   // 视频
-	MsgTypeFile    MessageType = "file"    // 通用文件
-	MsgTypeSticker MessageType = "sticker" // 贴纸/表情包
-	MsgTypeSystem  MessageType = "system"  // 系统消息 (入群, 退群, 置顶)
+	MsgTypeText    MessageType = "text"
+	MsgTypeRich    MessageType = "rich" // 含 Embed/Card
+	MsgTypeImage   MessageType = "image"
+	MsgTypeAudio   MessageType = "audio"
+	MsgTypeVideo   MessageType = "video"
+	MsgTypeFile    MessageType = "file"
+	MsgTypeSticker MessageType = "sticker"
+	MsgTypeSystem  MessageType = "system"
 )
 
-// --- Event & Message Models ---
+type RoomType string
 
-// Event 通用事件包装器
+const (
+	RoomTypeText     RoomType = "text"
+	RoomTypeVoice    RoomType = "voice"
+	RoomTypeDM       RoomType = "dm"
+	RoomTypeCategory RoomType = "category"
+)
+
+// --- Core Structs ---
+
+// Event 事件包装器
 type Event struct {
-	ID        string      `json:"id"`        // 事件全局唯一ID
-	Type      MessageType `json:"type"`      // 事件类型
-	Platform  string      `json:"platform"`  // 来源平台
-	Timestamp time.Time   `json:"timestamp"` // 事件发生时间
-
-	Message *Message `json:"message,omitempty"` // 消息体 (如果是消息事件)
-	Room    *Room    `json:"room,omitempty"`    // 房间信息 (如果是房间更新事件)
+	ID        string      `json:"id"`
+	Type      MessageType `json:"type"`
+	Platform  string      `json:"platform"`
+	Timestamp time.Time   `json:"timestamp"`
+	Message   *Message    `json:"message,omitempty"`
+	Room      *Room       `json:"room,omitempty"`
 }
 
 // Message 统一消息模型
 type Message struct {
-	ID           string `json:"id"`            // 消息ID
-	RoomID       string `json:"room_id"`       // 所属房间ID
-	SenderID     string `json:"sender_id"`     // 发送者ID
-	SenderName   string `json:"sender_name"`   // 发送者显示名称
-	SenderAvatar string `json:"sender_avatar"` // 发送者头像
+	ID           string `json:"id"`
+	RoomID       string `json:"room_id"`
+	SenderID     string `json:"sender_id"`
+	SenderName   string `json:"sender_name"`
+	SenderAvatar string `json:"sender_avatar"`
 
-	// 核心内容区
-	Content       string `json:"content"`                  // 纯文本内容 (Fallback)
-	Format        string `json:"format,omitempty"`         // 格式标记 (e.g. "markdown", "html")
-	FormattedBody string `json:"formatted_body,omitempty"` // 格式化后的内容 (Matrix HTML)
+	Content string   `json:"content"` // 纯文本内容
+	Files   []*File  `json:"files,omitempty"`
+	Embeds  []*Embed `json:"embeds,omitempty"`
 
-	// 媒体与附件
-	Files []*File `json:"files,omitempty"`
+	ReplyToID string   `json:"reply_to_id,omitempty"`
+	Mentions  []string `json:"mentions,omitempty"` // ID列表
 
-	// 富文本组件
-	Embeds []*Embed `json:"embeds,omitempty"`
-
-	// 引用与社交关系
-	ReplyToID string   `json:"reply_to_id,omitempty"` // 回复的目标消息ID
-	Mentions  []string `json:"mentions,omitempty"`    // 被提及(At)的用户ID列表
-
-	// Extra 存储平台原生数据
 	Extra map[string]interface{} `json:"extra,omitempty"`
 }
 
-// File 通用文件/媒体定义
 type File struct {
-	ID           string `json:"id,omitempty"`            // 平台侧文件ID (如果有)
-	URL          string `json:"url"`                     // 文件下载/访问链接
-	Name         string `json:"name"`                    // 文件名
-	MimeType     string `json:"mime_type"`               // MIME类型
-	Size         int64  `json:"size"`                    // 文件大小(字节)
-	Width        int    `json:"width,omitempty"`         // 宽度 (图片/视频)
-	Height       int    `json:"height,omitempty"`        // 高度 (图片/视频)
-	Duration     int    `json:"duration,omitempty"`      // 时长(秒, 音视频)
-	ThumbnailURL string `json:"thumbnail_url,omitempty"` // 缩略图链接
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	MimeType     string `json:"mime_type"`
+	Size         int64  `json:"size"`
+	ThumbnailURL string `json:"thumbnail_url,omitempty"`
 }
 
-// Embed 富文本嵌入
 type Embed struct {
 	Title       string        `json:"title,omitempty"`
 	Description string        `json:"description,omitempty"`
 	URL         string        `json:"url,omitempty"`
 	Color       int           `json:"color,omitempty"`
-	Timestamp   string        `json:"timestamp,omitempty"`
 	Footer      *EmbedFooter  `json:"footer,omitempty"`
 	Image       *File         `json:"image,omitempty"`
 	Thumbnail   *File         `json:"thumbnail,omitempty"`
@@ -107,46 +96,30 @@ type EmbedField struct {
 	Inline bool   `json:"inline,omitempty"`
 }
 
-// OutboundMessage 出站消息请求结构
+// OutboundMessage 出站消息
 type OutboundMessage struct {
-	TargetPlatform string   `json:"target_platform"` // 目标平台
-	TargetRoomID   string   `json:"target_room_id"`  // 目标房间ID
-	Message        *Message `json:"message"`         // 要发送的消息实体
-
-	DisablePreview bool `json:"disable_preview,omitempty"`
-	Silent         bool `json:"silent,omitempty"`
+	TargetPlatform string   `json:"target_platform"`
+	TargetRoomID   string   `json:"target_room_id"`
+	Message        *Message `json:"message"`
 }
 
-// --- Platform & Room Models ---
-
-type RoomType string
-
-const (
-	RoomTypeText     RoomType = "text"
-	RoomTypeVoice    RoomType = "voice"
-	RoomTypeDM       RoomType = "dm"
-	RoomTypeCategory RoomType = "category"
-)
+// --- Room & Binding ---
 
 type Room struct {
 	ID        string                 `json:"id"`
 	Platform  string                 `json:"platform"`
-	ParentID  string                 `json:"parent_id,omitempty"`
-	Type      RoomType               `json:"type"`
 	Name      string                 `json:"name"`
-	Topic     string                 `json:"topic,omitempty"`
+	Type      RoomType               `json:"type"`
 	AvatarURL string                 `json:"avatar_url,omitempty"`
 	Extra     map[string]interface{} `json:"extra,omitempty"`
 }
 
 type RoomMember struct {
-	UserID      string                 `json:"user_id"`
-	Username    string                 `json:"username"`
-	DisplayName string                 `json:"display_name"`
-	AvatarURL   string                 `json:"avatar_url,omitempty"`
-	IsBot       bool                   `json:"is_bot"`
-	IsAdmin     bool                   `json:"is_admin"`
-	Extra       map[string]interface{} `json:"extra,omitempty"`
+	UserID      string `json:"user_id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	AvatarURL   string `json:"avatar_url,omitempty"`
+	IsBot       bool   `json:"is_bot"`
 }
 
 type RoomBinding struct {
@@ -159,42 +132,25 @@ type BoundRoom struct {
 	RoomID   string
 }
 
-// Platform 平台适配器接口
+// --- Interfaces ---
+
 type Platform interface {
-	// Name 返回平台名称 (e.g. "discord", "telegram")
 	Name() string
-
-	// GetRouteType 返回该平台的路由类型 (镜像 or 聚合)
 	GetRouteType() RouteType
-
-	// Start 启动平台适配器
 	Start(ctx context.Context) error
-
-	// Stop 停止平台适配器
 	Stop(ctx context.Context) error
-
-	// SendMessage 发送消息
 	SendMessage(ctx context.Context, msg *OutboundMessage) (string, error)
-
-	// UploadFile 上传文件/图片
 	UploadFile(ctx context.Context, data []byte, filename string) (string, error)
-
-	// GetRoom 获取房间/频道信息
 	GetRoom(ctx context.Context, roomID string) (*Room, error)
-
-	// GetRoomMembers 获取房间成员列表
 	GetRoomMembers(ctx context.Context, roomID string) ([]*RoomMember, error)
-
-	// GetMessageLink 获取消息跳转链接
-	GetMessageLink(roomID, msgID string) string
 }
 
-// InboundHandler 入站事件处理器接口
 type InboundHandler interface {
 	HandleEvent(ctx context.Context, event *Event) error
 }
 
-// PlatformRegistry 平台注册表
+// --- Registry ---
+
 type PlatformRegistry struct {
 	platforms map[string]Platform
 }
