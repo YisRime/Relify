@@ -2,55 +2,40 @@
 package storage
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
-	"sync"
 
 	"Relify/internal/logger"
 	"Relify/internal/model"
-
-	_ "modernc.org/sqlite"
 )
 
 // RouteStore 路由绑定存储
 type RouteStore struct {
-	db       *sql.DB
-	mu       sync.RWMutex
+	*BaseStore
 	bindings map[string]*model.RoomBinding
 	roomMap  map[string][]string
-	logger   *logger.Logger
 }
 
 // NewRouteStore 创建路由存储
 func NewRouteStore(dbPath string, log *logger.Logger) (*RouteStore, error) {
-	if dbPath == "" {
-		return nil, fmt.Errorf("database path cannot be empty")
-	}
-
-	db, err := sql.Open("sqlite", dbPath+"?_journal=WAL&_timeout=5000")
+	base, err := NewBaseStore(dbPath, log)
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
-	}
-
-	if log == nil {
-		log = logger.GetGlobal()
+		return nil, err
 	}
 
 	store := &RouteStore{
-		db:       db,
-		bindings: make(map[string]*model.RoomBinding),
-		roomMap:  make(map[string][]string),
-		logger:   log,
+		BaseStore: base,
+		bindings:  make(map[string]*model.RoomBinding),
+		roomMap:   make(map[string][]string),
 	}
 
 	if err := store.initSchema(); err != nil {
-		db.Close()
+		base.Close()
 		return nil, fmt.Errorf("initialize schema: %w", err)
 	}
 
 	if err := store.loadAll(); err != nil {
-		db.Close()
+		base.Close()
 		return nil, fmt.Errorf("load bindings: %w", err)
 	}
 
@@ -70,21 +55,20 @@ func (s *RouteStore) initSchema() error {
 		rooms_json TEXT NOT NULL
 	);
 	`
-	_, err := s.db.Exec(schema)
-	return err
+	return s.ExecSchema(schema)
 }
 
 // loadAll 加载所有绑定到内存
 func (s *RouteStore) loadAll() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	rows, err := s.db.Query("SELECT id, type, rooms_json FROM room_bindings")
+	rows, err := s.DB().Query("SELECT id, type, rooms_json FROM room_bindings")
 	if err != nil {
 		s.logger.Error("storage", "Failed to load bindings", map[string]interface{}{"error": err.Error()})
 		return err
 	}
 	defer rows.Close()
+
+	s.Lock()
+	defer s.Unlock()
 
 	for rows.Next() {
 		var id, bindingType, roomsJSON string
@@ -144,10 +128,10 @@ func (s *RouteStore) SaveBinding(binding *model.RoomBinding) error {
 
 	query := `INSERT OR REPLACE INTO room_bindings (id, type, rooms_json) VALUES (?, ?, ?)`
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, err := s.db.Exec(query, binding.ID, "", string(roomsJSON)); err != nil {
+	s.Lock()
+	_, err = s.DB().Exec(query, binding.ID, "", string(roomsJSON))
+	if err != nil {
+		s.Unlock()
 		s.logger.Error("storage", "Failed to save binding", map[string]interface{}{
 			"binding_id": binding.ID,
 			"error":      err.Error(),
@@ -162,6 +146,7 @@ func (s *RouteStore) SaveBinding(binding *model.RoomBinding) error {
 			s.roomMap[key] = append(s.roomMap[key], binding.ID)
 		}
 	}
+	s.Unlock()
 
 	s.logger.Info("storage", "Binding saved", map[string]interface{}{
 		"binding_id": binding.ID,
@@ -173,36 +158,37 @@ func (s *RouteStore) SaveBinding(binding *model.RoomBinding) error {
 
 // GetBinding 获取绑定
 func (s *RouteStore) GetBinding(id string) (*model.RoomBinding, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.RLock()
 	binding, exists := s.bindings[id]
+	s.RUnlock()
 	return binding, exists
 }
 
 // GetBindingsByRoom 根据房间查找绑定
 func (s *RouteStore) GetBindingsByRoom(platform, roomID string) []*model.RoomBinding {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	key := platform + ":" + roomID
-	bindingIDs := s.roomMap[key]
 
+	s.RLock()
+	bindingIDs := s.roomMap[key]
 	bindings := make([]*model.RoomBinding, 0, len(bindingIDs))
 	for _, id := range bindingIDs {
 		if binding, exists := s.bindings[id]; exists {
 			bindings = append(bindings, binding)
 		}
 	}
+	s.RUnlock()
+
 	return bindings
 }
 
 // DeleteBinding 删除绑定
 func (s *RouteStore) DeleteBinding(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	query := `DELETE FROM room_bindings WHERE id = ?`
-	if _, err := s.db.Exec(query, id); err != nil {
+
+	s.Lock()
+	_, err := s.DB().Exec(query, id)
+	if err != nil {
+		s.Unlock()
 		s.logger.Error("storage", "Failed to delete binding", map[string]interface{}{
 			"binding_id": id,
 			"error":      err.Error(),
@@ -218,26 +204,26 @@ func (s *RouteStore) DeleteBinding(id string) error {
 		delete(s.bindings, id)
 		s.logger.Info("storage", "Binding deleted", map[string]interface{}{"binding_id": id})
 	}
+	s.Unlock()
 
 	return nil
 }
 
 // ListBindings 列出所有绑定
 func (s *RouteStore) ListBindings() []*model.RoomBinding {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	s.RLock()
 	bindings := make([]*model.RoomBinding, 0, len(s.bindings))
 	for _, binding := range s.bindings {
 		bindings = append(bindings, binding)
 	}
+	s.RUnlock()
 	return bindings
 }
 
 // Close 关闭数据库
 func (s *RouteStore) Close() error {
 	s.logger.Info("storage", "Closing RouteStore")
-	return s.db.Close()
+	return s.BaseStore.Close()
 }
 
 // 辅助方法

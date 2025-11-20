@@ -2,9 +2,7 @@
 package storage
 
 import (
-	"database/sql"
 	"fmt"
-	"sync"
 	"time"
 
 	"Relify/internal/logger"
@@ -24,30 +22,20 @@ type UserMapping struct {
 
 // UserMapStore 用户映射存储
 type UserMapStore struct {
-	db     *sql.DB
-	mu     sync.RWMutex
-	logger *logger.Logger
+	*BaseStore
 }
 
 // NewUserMapStore 创建用户映射存储
 func NewUserMapStore(dbPath string, log *logger.Logger) (*UserMapStore, error) {
-	if dbPath == "" {
-		return nil, fmt.Errorf("database path cannot be empty")
-	}
-
-	db, err := sql.Open("sqlite", dbPath+"?_journal=WAL&_timeout=5000")
+	base, err := NewBaseStore(dbPath, log)
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, err
 	}
 
-	if log == nil {
-		log = logger.GetGlobal()
-	}
-
-	store := &UserMapStore{db: db, logger: log}
+	store := &UserMapStore{BaseStore: base}
 
 	if err := store.initSchema(); err != nil {
-		db.Close()
+		base.Close()
 		return nil, fmt.Errorf("initialize schema: %w", err)
 	}
 
@@ -74,8 +62,7 @@ func (s *UserMapStore) initSchema() error {
 	ON user_mappings(source_platform, source_user_id, target_platform);
 	`
 
-	_, err := s.db.Exec(schema)
-	return err
+	return s.ExecSchema(schema)
 }
 
 // Save 保存或更新用户映射
@@ -92,9 +79,6 @@ func (s *UserMapStore) Save(mapping *UserMapping) error {
 	if mapping.DisplayName == "" {
 		return fmt.Errorf("display name cannot be empty")
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	now := time.Now()
 	if mapping.CreatedAt.IsZero() {
@@ -114,7 +98,8 @@ func (s *UserMapStore) Save(mapping *UserMapping) error {
 			updated_at = excluded.updated_at
 	`
 
-	_, err := s.db.Exec(query,
+	s.Lock()
+	_, err := s.DB().Exec(query,
 		mapping.SourcePlatform,
 		mapping.SourceUserID,
 		mapping.TargetPlatform,
@@ -124,6 +109,7 @@ func (s *UserMapStore) Save(mapping *UserMapping) error {
 		mapping.CreatedAt.Unix(),
 		mapping.UpdatedAt.Unix(),
 	)
+	s.Unlock()
 
 	if err != nil {
 		s.logger.Error("storage", "Failed to save user mapping", map[string]interface{}{
@@ -148,22 +134,19 @@ func (s *UserMapStore) Save(mapping *UserMapping) error {
 
 // GetTargetUserID 查询目标用户ID
 func (s *UserMapStore) GetTargetUserID(sourcePlatform, sourceUserID, targetPlatform string) (string, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	var targetUserID string
 	query := `SELECT target_user_id FROM user_mappings 
 		WHERE source_platform = ? AND source_user_id = ? AND target_platform = ?`
 
-	err := s.db.QueryRow(query, sourcePlatform, sourceUserID, targetPlatform).Scan(&targetUserID)
+	s.RLock()
+	err := s.DB().QueryRow(query, sourcePlatform, sourceUserID, targetPlatform).Scan(&targetUserID)
+	s.RUnlock()
+
 	return targetUserID, err == nil
 }
 
 // GetMapping 获取完整的用户映射
 func (s *UserMapStore) GetMapping(sourcePlatform, sourceUserID, targetPlatform string) (*UserMapping, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	var mapping UserMapping
 	var createdAt, updatedAt int64
 
@@ -174,7 +157,8 @@ func (s *UserMapStore) GetMapping(sourcePlatform, sourceUserID, targetPlatform s
 		WHERE source_platform = ? AND source_user_id = ? AND target_platform = ?
 	`
 
-	err := s.db.QueryRow(query, sourcePlatform, sourceUserID, targetPlatform).Scan(
+	s.RLock()
+	err := s.DB().QueryRow(query, sourcePlatform, sourceUserID, targetPlatform).Scan(
 		&mapping.SourcePlatform,
 		&mapping.SourceUserID,
 		&mapping.TargetPlatform,
@@ -184,6 +168,7 @@ func (s *UserMapStore) GetMapping(sourcePlatform, sourceUserID, targetPlatform s
 		&createdAt,
 		&updatedAt,
 	)
+	s.RUnlock()
 
 	if err != nil {
 		s.logger.Debug("storage", "User mapping not found", map[string]interface{}{
@@ -203,5 +188,5 @@ func (s *UserMapStore) GetMapping(sourcePlatform, sourceUserID, targetPlatform s
 // Close 关闭数据库
 func (s *UserMapStore) Close() error {
 	s.logger.Info("storage", "Closing UserMapStore")
-	return s.db.Close()
+	return s.BaseStore.Close()
 }

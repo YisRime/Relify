@@ -2,21 +2,15 @@
 package storage
 
 import (
-	"database/sql"
 	"fmt"
-	"sync"
 	"time"
 
 	"Relify/internal/logger"
-
-	_ "modernc.org/sqlite"
 )
 
 // MessageMapStore 消息ID映射存储
 type MessageMapStore struct {
-	db     *sql.DB
-	mu     sync.RWMutex
-	logger *logger.Logger
+	*BaseStore
 }
 
 // MessageMapping 消息映射
@@ -30,23 +24,15 @@ type MessageMapping struct {
 
 // NewMessageMapStore 创建消息映射存储
 func NewMessageMapStore(dbPath string, log *logger.Logger) (*MessageMapStore, error) {
-	if dbPath == "" {
-		return nil, fmt.Errorf("database path cannot be empty")
-	}
-
-	db, err := sql.Open("sqlite", dbPath+"?_journal=WAL&_timeout=5000")
+	base, err := NewBaseStore(dbPath, log)
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, err
 	}
 
-	if log == nil {
-		log = logger.GetGlobal()
-	}
-
-	store := &MessageMapStore{db: db, logger: log}
+	store := &MessageMapStore{BaseStore: base}
 
 	if err := store.initSchema(); err != nil {
-		db.Close()
+		base.Close()
 		return nil, fmt.Errorf("initialize schema: %w", err)
 	}
 
@@ -72,8 +58,7 @@ func (s *MessageMapStore) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_target_lookup ON message_mappings(target_platform, target_msg_id);
 	`
 
-	_, err := s.db.Exec(schema)
-	return err
+	return s.ExecSchema(schema)
 }
 
 // Save 保存消息 ID 映射关系
@@ -86,15 +71,15 @@ func (s *MessageMapStore) Save(mapping *MessageMapping) error {
 		return fmt.Errorf("invalid mapping: all fields are required")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	query := `INSERT OR REPLACE INTO message_mappings 
 		(source_platform, source_msg_id, target_platform, target_msg_id, created_at)
 		VALUES (?, ?, ?, ?, ?)`
 
-	_, err := s.db.Exec(query, mapping.SourcePlatform, mapping.SourceMsgID,
+	s.Lock()
+	_, err := s.DB().Exec(query, mapping.SourcePlatform, mapping.SourceMsgID,
 		mapping.TargetPlatform, mapping.TargetMsgID, mapping.CreatedAt.Unix())
+	s.Unlock()
+
 	if err != nil {
 		return fmt.Errorf("save message mapping: %w", err)
 	}
@@ -104,14 +89,14 @@ func (s *MessageMapStore) Save(mapping *MessageMapping) error {
 
 // GetTargetID 根据来源消息查找目标平台的消息 ID
 func (s *MessageMapStore) GetTargetID(sourcePlatform, sourceMsgID, targetPlatform string) (string, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	var targetMsgID string
 	query := `SELECT target_msg_id FROM message_mappings
 		WHERE source_platform = ? AND source_msg_id = ? AND target_platform = ?`
 
-	err := s.db.QueryRow(query, sourcePlatform, sourceMsgID, targetPlatform).Scan(&targetMsgID)
+	s.RLock()
+	err := s.DB().QueryRow(query, sourcePlatform, sourceMsgID, targetPlatform).Scan(&targetMsgID)
+	s.RUnlock()
+
 	return targetMsgID, err == nil
 }
 
@@ -124,16 +109,16 @@ func (s *MessageMapStore) GetTargetID(sourcePlatform, sourceMsgID, targetPlatfor
 //   - []MessageMapping: 所有映射关系列表
 //   - error: 错误信息
 func (s *MessageMapStore) GetAllTargets(sourcePlatform, sourceMsgID string) ([]MessageMapping, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	query := `
 		SELECT source_platform, source_msg_id, target_platform, target_msg_id, created_at
 		FROM message_mappings
 		WHERE source_platform = ? AND source_msg_id = ?
 	`
 
-	rows, err := s.db.Query(query, sourcePlatform, sourceMsgID)
+	s.RLock()
+	rows, err := s.DB().Query(query, sourcePlatform, sourceMsgID)
+	s.RUnlock()
+
 	if err != nil {
 		s.logger.Error("storage", "Failed to query message mappings", map[string]interface{}{
 			"source_platform": sourcePlatform,
@@ -144,7 +129,7 @@ func (s *MessageMapStore) GetAllTargets(sourcePlatform, sourceMsgID string) ([]M
 	}
 	defer rows.Close()
 
-	var mappings []MessageMapping
+	mappings := make([]MessageMapping, 0, 4) // 预分配容量，一般不会超过4个目标平台
 	for rows.Next() {
 		var m MessageMapping
 		var createdAt int64
@@ -173,14 +158,15 @@ func (s *MessageMapStore) cleanupLoop() {
 
 // cleanup 清理过期数据（TTL: 48 小时）
 func (s *MessageMapStore) cleanup() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	ttl := 48 * time.Hour
 	cutoff := time.Now().Add(-ttl).Unix()
 
 	query := `DELETE FROM message_mappings WHERE created_at < ?`
-	result, err := s.db.Exec(query, cutoff)
+
+	s.Lock()
+	result, err := s.DB().Exec(query, cutoff)
+	s.Unlock()
+
 	if err != nil {
 		s.logger.Error("storage", "Failed to cleanup expired message mappings", map[string]interface{}{
 			"error": err.Error(),
@@ -198,5 +184,5 @@ func (s *MessageMapStore) cleanup() {
 // Close 关闭数据库连接
 func (s *MessageMapStore) Close() error {
 	s.logger.Info("storage", "Closing MessageMapStore")
-	return s.db.Close()
+	return s.BaseStore.Close()
 }
