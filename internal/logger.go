@@ -1,5 +1,5 @@
-// Package logger 提供统一的日志系统
-package logger
+// Package internal 提供统一的日志系统
+package internal
 
 import (
 	"encoding/json"
@@ -77,8 +77,8 @@ type LogEntry struct {
 	Fields    map[string]interface{} `json:"fields,omitempty"`
 }
 
-// New 创建新的日志记录器
-func New(level Level, format Format, output io.Writer) *Logger {
+// NewLogger 创建新的日志记录器 (原名 New)
+func NewLogger(level Level, format Format, output io.Writer) *Logger {
 	return &Logger{
 		level:  level,
 		format: format,
@@ -86,8 +86,8 @@ func New(level Level, format Format, output io.Writer) *Logger {
 	}
 }
 
-// NewFromConfig 从配置创建日志记录器
-func NewFromConfig(levelStr, logsDir string) (*Logger, error) {
+// NewLoggerFromConfig 从配置创建日志记录器
+func NewLoggerFromConfig(levelStr, logsDir string) (*Logger, error) {
 	level := ParseLevel(levelStr)
 	format := JSONFormat
 
@@ -105,7 +105,7 @@ func NewFromConfig(levelStr, logsDir string) (*Logger, error) {
 
 	// 同时输出到文件和 stderr
 	output := io.MultiWriter(f, os.Stderr)
-	return New(level, format, output), nil
+	return NewLogger(level, format, output), nil
 }
 
 // Debug 记录 DEBUG 级别日志
@@ -252,7 +252,7 @@ var (
 )
 
 func initGlobal() {
-	global = New(InfoLevel, JSONFormat, os.Stdout)
+	global = NewLogger(InfoLevel, JSONFormat, os.Stdout)
 }
 
 // SetGlobal 设置全局日志记录器

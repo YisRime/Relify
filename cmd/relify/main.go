@@ -10,9 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"Relify/internal/config"
-	"Relify/internal/core"
-	"Relify/internal/logger"
+	"Relify/internal"
 )
 
 const (
@@ -24,7 +22,8 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
 	flag.Parse()
 
-	cfg, err := config.LoadConfig(*configPath)
+	// 加载配置
+	cfg, err := internal.LoadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
@@ -35,19 +34,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 创建数据目录
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create data directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	log, err := logger.NewFromConfig(cfg.LogLevel, cfg.GetLogsDir())
+	// 初始化日志系统
+	log, err := internal.NewLoggerFromConfig(cfg.LogLevel, cfg.GetLogsDir())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
 		os.Exit(1)
 	}
-	logger.SetGlobal(log)
+	internal.SetGlobal(log)
 
-	coreInst, err := core.NewCore(&core.Config{
+	// 初始化核心业务层
+	coreInst, err := internal.NewCore(&internal.CoreConfig{
 		DatabasePath: cfg.GetDatabasePath(),
 		AppConfig:    cfg,
 	})
@@ -56,32 +58,36 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO: 注册平台适配器
+	// TODO: 在此处注册具体平台的适配器
+	// 例如: coreInst.RegisterPlatform(discord.NewAdapter(...))
 
+	// 启动系统
 	ctx := context.Background()
 	if err := coreInst.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start: %v\n", err)
 		os.Exit(1)
 	}
 
-	logger.Info("main", "Relify started successfully")
-	logger.Info("main", "Press Ctrl+C to stop")
+	internal.Info("main", "Relify started successfully")
+	internal.Info("main", "Press Ctrl+C to stop")
 
+	// 等待中断信号
 	sigChan := make(chan os.Signal, signalBuffer)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
 
-	logger.Info("main", "Shutting down...")
+	internal.Info("main", "Shutting down...")
 
+	// 优雅关闭
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
 	if err := coreInst.Stop(shutdownCtx); err != nil {
-		logger.Error("main", "Error during shutdown", map[string]interface{}{
+		internal.Error("main", "Error during shutdown", map[string]interface{}{
 			"error": err.Error(),
 		})
 		os.Exit(1)
 	}
 
-	logger.Info("main", "Shutdown complete")
+	internal.Info("main", "Shutdown complete")
 }

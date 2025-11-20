@@ -1,5 +1,5 @@
-// Package config 提供应用配置管理
-package config
+// Package internal 提供应用配置管理
+package internal
 
 import (
 	"fmt"
@@ -34,13 +34,7 @@ type PlatformConfig struct {
 	Config  map[string]interface{}
 }
 
-// RouteType 路由类型
-type RouteType string
-
-const (
-	RouteTypeMirror    RouteType = "mirror"
-	RouteTypeAggregate RouteType = "aggregate"
-)
+// (RouteType 已移除，移动至 model.go)
 
 // LoadConfig 加载配置
 func LoadConfig(path string) (*Config, error) {
@@ -97,6 +91,8 @@ func (c *Config) Validate() error {
 		if c.HubPlatform == "" {
 			return fmt.Errorf("hub_platform must be specified in hub mode")
 		}
+		// 注意：此时平台还没注册，只能校验配置中是否有该Key，
+		// 无法校验该平台是否真是Hub类型，这部分校验推迟到 Core 初始化
 		if _, exists := c.Platforms[c.HubPlatform]; !exists {
 			return fmt.Errorf("hub_platform '%s' not found in platform configurations", c.HubPlatform)
 		}

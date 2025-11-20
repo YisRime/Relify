@@ -1,5 +1,5 @@
-// Package storage 提供持久化存储功能
-package storage
+// Package internal 提供持久化存储功能
+package internal
 
 import (
 	"database/sql"
@@ -8,9 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"Relify/internal/logger"
-	"Relify/internal/model"
-
 	_ "modernc.org/sqlite"
 )
 
@@ -18,11 +15,11 @@ import (
 type Store struct {
 	db     *sql.DB
 	mu     sync.RWMutex
-	logger *logger.Logger
+	logger *Logger
 
 	// 内存缓存
-	bindingCache      map[string]*model.RoomBinding  // binding_id -> binding
-	roomIndex         map[string][]string            // room_key -> []binding_id
+	bindingCache      map[string]*RoomBinding        // binding_id -> binding
+	roomIndex         map[string][]string            // room_key -> []binding_id (支持多对多)
 	messageMappingIdx map[string]*MessageMappingNode // source_key -> mapping tree
 	cacheMu           sync.RWMutex
 }
@@ -49,13 +46,12 @@ type UserMapping struct {
 	SourceUserID   string
 	TargetPlatform string
 	TargetUserID   string
-	DisplayName    string
 	Username       string
 	UpdatedAt      time.Time
 }
 
 // NewStore 创建统一存储
-func NewStore(dbPath string, log *logger.Logger) (*Store, error) {
+func NewStore(dbPath string, log *Logger) (*Store, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("database path cannot be empty")
 	}
@@ -70,13 +66,13 @@ func NewStore(dbPath string, log *logger.Logger) (*Store, error) {
 	db.SetMaxIdleConns(2)
 
 	if log == nil {
-		log = logger.GetGlobal()
+		log = GetGlobal()
 	}
 
 	store := &Store{
 		db:                db,
 		logger:            log,
-		bindingCache:      make(map[string]*model.RoomBinding),
+		bindingCache:      make(map[string]*RoomBinding),
 		roomIndex:         make(map[string][]string),
 		messageMappingIdx: make(map[string]*MessageMappingNode),
 	}
@@ -141,7 +137,6 @@ func (s *Store) initSchema() error {
 		source_user_id TEXT NOT NULL,
 		target_platform TEXT NOT NULL,
 		target_user_id TEXT NOT NULL,
-		display_name TEXT NOT NULL,
 		username TEXT,
 		updated_at INTEGER NOT NULL,
 		PRIMARY KEY (source_platform, source_user_id, target_platform)
@@ -181,7 +176,7 @@ func (s *Store) loadBindings() error {
 			return err
 		}
 
-		binding := &model.RoomBinding{ID: id}
+		binding := &RoomBinding{ID: id}
 		if err := json.Unmarshal([]byte(roomsJSON), &binding.Rooms); err != nil {
 			return err
 		}
@@ -197,7 +192,7 @@ func (s *Store) loadBindings() error {
 }
 
 // SaveBinding 保存房间绑定
-func (s *Store) SaveBinding(binding *model.RoomBinding) error {
+func (s *Store) SaveBinding(binding *RoomBinding) error {
 	if binding == nil || binding.ID == "" || len(binding.Rooms) == 0 {
 		return fmt.Errorf("invalid binding")
 	}
@@ -224,9 +219,10 @@ func (s *Store) SaveBinding(binding *model.RoomBinding) error {
 	// 更新缓存
 	s.cacheMu.Lock()
 	s.bindingCache[binding.ID] = binding
-	// 清理旧索引
-	for key := range s.roomIndex {
-		s.roomIndex[key] = removeFromSlice(s.roomIndex[key], binding.ID)
+	// 清理涉及到的旧索引 (简单起见，这里假设全量重建该Binding的索引)
+	// 更严谨的做法是对比差异，这里采用先删后加
+	for key, ids := range s.roomIndex {
+		s.roomIndex[key] = removeFromSlice(ids, binding.ID)
 	}
 	// 重建索引
 	for _, room := range binding.Rooms {
@@ -240,7 +236,7 @@ func (s *Store) SaveBinding(binding *model.RoomBinding) error {
 }
 
 // GetBinding 获取绑定
-func (s *Store) GetBinding(id string) (*model.RoomBinding, bool) {
+func (s *Store) GetBinding(id string) (*RoomBinding, bool) {
 	s.cacheMu.RLock()
 	binding, exists := s.bindingCache[id]
 	s.cacheMu.RUnlock()
@@ -248,12 +244,13 @@ func (s *Store) GetBinding(id string) (*model.RoomBinding, bool) {
 }
 
 // GetBindingsByRoom 获取房间所属的绑定
-func (s *Store) GetBindingsByRoom(platform, roomID string) []*model.RoomBinding {
+// 对应新模型：根据 Platform + RoomID 查找
+func (s *Store) GetBindingsByRoom(platform, roomID string) []*RoomBinding {
 	key := roomKey(platform, roomID)
 
 	s.cacheMu.RLock()
 	bindingIDs := s.roomIndex[key]
-	bindings := make([]*model.RoomBinding, 0, len(bindingIDs))
+	bindings := make([]*RoomBinding, 0, len(bindingIDs))
 	for _, id := range bindingIDs {
 		if b := s.bindingCache[id]; b != nil {
 			bindings = append(bindings, b)
@@ -265,9 +262,9 @@ func (s *Store) GetBindingsByRoom(platform, roomID string) []*model.RoomBinding 
 }
 
 // ListBindings 列出所有绑定
-func (s *Store) ListBindings() []*model.RoomBinding {
+func (s *Store) ListBindings() []*RoomBinding {
 	s.cacheMu.RLock()
-	bindings := make([]*model.RoomBinding, 0, len(s.bindingCache))
+	bindings := make([]*RoomBinding, 0, len(s.bindingCache))
 	for _, binding := range s.bindingCache {
 		bindings = append(bindings, binding)
 	}
@@ -412,13 +409,12 @@ func (s *Store) SaveUserMapping(mapping *UserMapping) error {
 	now := time.Now()
 	mapping.UpdatedAt = now
 
-	query := `INSERT INTO user_mappings 
-		(source_platform, source_user_id, target_platform, target_user_id, display_name, username, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+	query := `INSERT INTO user_mappings
+		(source_platform, source_user_id, target_platform, target_user_id, username, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source_platform, source_user_id, target_platform)
 		DO UPDATE SET
 			target_user_id = excluded.target_user_id,
-			display_name = excluded.display_name,
 			username = excluded.username,
 			updated_at = excluded.updated_at`
 
@@ -428,7 +424,6 @@ func (s *Store) SaveUserMapping(mapping *UserMapping) error {
 		mapping.SourceUserID,
 		mapping.TargetPlatform,
 		mapping.TargetUserID,
-		mapping.DisplayName,
 		mapping.Username,
 		now.Unix(),
 	)
@@ -461,7 +456,7 @@ func (s *Store) GetUserMapping(sourcePlatform, sourceUserID, targetPlatform stri
 	var updatedAt int64
 
 	query := `SELECT source_platform, source_user_id, target_platform, target_user_id, 
-		display_name, username, updated_at FROM user_mappings 
+		username, updated_at FROM user_mappings 
 		WHERE source_platform = ? AND source_user_id = ? AND target_platform = ?`
 
 	s.mu.RLock()
@@ -470,7 +465,6 @@ func (s *Store) GetUserMapping(sourcePlatform, sourceUserID, targetPlatform stri
 		&mapping.SourceUserID,
 		&mapping.TargetPlatform,
 		&mapping.TargetUserID,
-		&mapping.DisplayName,
 		&username,
 		&updatedAt,
 	)
