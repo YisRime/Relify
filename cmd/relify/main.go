@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"Relify/internal/config"
 	"Relify/internal/core"
@@ -78,7 +79,7 @@ func main() {
 	logger.Info("main", "Shutting down...")
 
 	// 停止核心层
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := coreInst.Stop(shutdownCtx); err != nil {

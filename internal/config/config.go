@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,9 +17,6 @@ type Config struct {
 
 	// 日志配置
 	Log LogConfig `yaml:"log"`
-
-	// 服务器配置
-	Server ServerConfig `yaml:"server"`
 }
 
 // DatabaseConfig 数据库配置
@@ -41,13 +37,6 @@ type LogConfig struct {
 	Format string `yaml:"format"` // 日志格式：json, text
 	Output string `yaml:"output"` // 输出目标：stdout, stderr, file
 	File   string `yaml:"file"`   // 日志文件路径（当 output=file 时）
-}
-
-// ServerConfig HTTP 服务器配置
-type ServerConfig struct {
-	Host            string        `yaml:"host"`             // HTTP 服务器地址
-	Port            int           `yaml:"port"`             // HTTP 服务器端口
-	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"` // 优雅关闭超时时间
 }
 
 // LoadConfig 从文件加载配置
@@ -98,17 +87,6 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Log.Output == "" {
 		cfg.Log.Output = "stdout"
-	}
-
-	// 服务器默认值
-	if cfg.Server.Host == "" {
-		cfg.Server.Host = "127.0.0.1"
-	}
-	if cfg.Server.Port == 0 {
-		cfg.Server.Port = 8080
-	}
-	if cfg.Server.ShutdownTimeout == 0 {
-		cfg.Server.ShutdownTimeout = 30 * time.Second
 	}
 }
 

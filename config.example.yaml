@@ -11,13 +11,7 @@ log:
   output: "stdout"   # stdout, stderr, file
   # file: "./logs/relify.log"  # 当 output=file 时使用
 
-# HTTP 服务器配置
-server:
-  host: "127.0.0.1"
-  port: 8080
-
 # 驱动配置
-# 注意: 房间绑定由系统自动管理，通过 HTTP API 动态添加/删除
 drivers:
   telegram:
     type: "telegram"
