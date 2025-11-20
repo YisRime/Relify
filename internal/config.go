@@ -7,21 +7,23 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Config 定义应用程序的配置结构
 type Config struct {
 	DataDir     string                    `yaml:"data_dir"`
 	LogLevel    string                    `yaml:"log_level"`
-	Mode        string                    `yaml:"mode"`
+	Mode        string                    `yaml:"mode"` // 运行模式: peer 或 hub
 	HubPlatform string                    `yaml:"hub_platform"`
 	Platforms   map[string]PlatformConfig `yaml:"platforms"`
 }
 
+// PlatformConfig 定义特定平台的配置
 type PlatformConfig struct {
 	Type    string                 `yaml:"type"`
 	Enabled bool                   `yaml:"enabled"`
-	Config  map[string]interface{} `yaml:"config"`
+	Config  map[string]interface{} `yaml:"config"` // 灵活的键值对配置
 }
 
-// LoadConfig 加载配置
+// LoadConfig 从指定路径读取并解析 YAML 配置文件
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -33,11 +35,12 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	// 应用默认值
 	setDefaults(&cfg)
 	return &cfg, nil
 }
 
-// SaveConfig 保存配置
+// SaveConfig 将配置结构体序列化并写入文件
 func SaveConfig(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -46,7 +49,7 @@ func SaveConfig(path string, cfg *Config) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// GenerateDefault 生成默认配置结构体
+// GenerateDefault 生成一个包含示例数据的默认配置对象
 func GenerateDefault() *Config {
 	return &Config{
 		DataDir:     "./data",
@@ -74,6 +77,7 @@ func GenerateDefault() *Config {
 	}
 }
 
+// setDefaults 为缺失的字段填充默认值
 func setDefaults(cfg *Config) {
 	if cfg.DataDir == "" {
 		cfg.DataDir = "./data"
@@ -86,20 +90,24 @@ func setDefaults(cfg *Config) {
 	}
 }
 
+// Validate 检查配置逻辑是否合法
 func (c *Config) Validate() error {
 	if c.Mode != "peer" && c.Mode != "hub" {
 		return fmt.Errorf("invalid mode: %s", c.Mode)
 	}
+	// Hub 模式下必须指定主控平台
 	if c.Mode == "hub" && c.HubPlatform == "" {
 		return fmt.Errorf("hub_platform required in hub mode")
 	}
 	return nil
 }
 
+// GetDatabasePath 获取数据库文件的完整路径
 func (c *Config) GetDatabasePath() string {
 	return c.DataDir + "/relify.db"
 }
 
+// GetLogsDir 获取日志文件夹路径
 func (c *Config) GetLogsDir() string {
 	return c.DataDir + "/logs"
 }

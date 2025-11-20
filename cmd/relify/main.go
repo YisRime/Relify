@@ -1,4 +1,3 @@
-// Relify - 跨平台消息桥接系统
 package main
 
 import (
@@ -11,61 +10,63 @@ import (
 	"time"
 
 	"Relify/internal"
-	// "Relify/platforms/discord"
 )
 
+// 定义优雅退出的超时时间
 const (
 	shutdownTimeout = 10 * time.Second
 )
 
 func main() {
-	// 1. 解析命令行参数
-	configPath := flag.String("config", "config.yaml", "配置文件路径")
+	// 定义命令行参数，默认为 config.yaml
+	configPath := flag.String("config", "config.yaml", "Path to the configuration file")
 	flag.Parse()
 
-	// 2. 自动检测配置是否存在
+	// 检查配置文件是否存在，若不存在则生成默认配置
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
-		fmt.Printf("配置文件 '%s' 未找到，正在生成默认配置...\n", *configPath)
+		fmt.Printf("Config file '%s' not found. Generating default config...\n", *configPath)
 
 		defaultCfg := internal.GenerateDefault()
+		// 尝试写入默认配置到磁盘
 		if err := internal.SaveConfig(*configPath, defaultCfg); err != nil {
-			fmt.Fprintf(os.Stderr, "❌ 无法写入默认配置文件: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Failed to write default config file: %v\n", err)
 			os.Exit(1)
 		}
 
-		fmt.Printf("✅ 默认配置已生成！\n请编辑 '%s' 填入正确的 Token 或 API Key，然后再次运行程序。\n", *configPath)
-		// 生成后直接退出，提示用户去修改。
+		// 提示用户修改配置后退出程序
+		fmt.Printf("Default config generated!\nPlease edit '%s' with valid Tokens/API Keys and restart the program.\n", *configPath)
 		os.Exit(0)
 	}
 
-	// 3. 加载配置
+	// 加载并解析配置文件
 	cfg, err := internal.LoadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 4. 校验配置
+	// 验证配置文件的合法性（如模式匹配等）
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 5. 创建数据目录
+	// 确保数据目录存在
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating data dir: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 6. 初始化日志
+	// 根据配置初始化日志系统
 	logger, err := internal.NewLoggerFromConfig(cfg.LogLevel, cfg.GetLogsDir())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing logger: %v\n", err)
 		os.Exit(1)
 	}
+	// 设置全局日志单例
 	internal.SetGlobal(logger)
 
-	// 7. 初始化核心
+	// 初始化核心应用逻辑
 	coreInst, err := internal.NewCore(&internal.CoreConfig{
 		AppConfig: cfg,
 	})
@@ -76,15 +77,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 8. 注册平台 (示例)
-	// if cfg.Platforms["discord_example"].Enabled {
-	//     coreInst.RegisterPlatform(discord.New(cfg.Platforms["discord_example"]))
-	// }
+	// 此处应进行具体的平台注册逻辑，通常根据配置动态注册
+	// 示例: if cfg.Platforms["discord"].Enabled { coreInst.Register(...) }
 
-	// 9. 启动
+	// 创建带有取消功能的上下文，用于控制生命周期
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// 启动核心服务及所有已注册的平台
 	if err := coreInst.Start(ctx); err != nil {
 		internal.Error("main", "Startup failed", map[string]interface{}{
 			"error": err.Error(),
@@ -94,16 +94,20 @@ func main() {
 
 	internal.Info("main", "Relify is running. Press Ctrl+C to stop.", nil)
 
-	// 10. 监听退出信号
+	// 创建信号通道，监听中断信号 (Ctrl+C) 和终止信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// 阻塞直到收到信号
 	<-sigChan
 
 	internal.Info("main", "Shutting down...", nil)
 
+	// 创建一个新的带超时的上下文用于优雅关闭
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer shutdownCancel()
 
+	// 执行核心组件的停止逻辑
 	if err := coreInst.Stop(shutdownCtx); err != nil {
 		internal.Error("main", "Shutdown error", map[string]interface{}{
 			"error": err.Error(),
