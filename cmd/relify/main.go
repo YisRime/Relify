@@ -12,108 +12,77 @@ import (
 	"Relify/internal"
 )
 
-// 定义优雅退出的超时时间
 const (
 	shutdownTimeout = 10 * time.Second
 )
 
 func main() {
-	// 定义命令行参数，默认为 config.yaml
 	configPath := flag.String("config", "config.yaml", "Path to the configuration file")
 	flag.Parse()
 
-	// 检查配置文件是否存在，若不存在则生成默认配置
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
-		fmt.Printf("Config file '%s' not found. Generating default config...\n", *configPath)
-
+		fmt.Printf("Config file '%s' not found. Generating default...\n", *configPath)
 		defaultCfg := internal.GenerateDefault()
-		// 尝试写入默认配置到磁盘
 		if err := internal.SaveConfig(*configPath, defaultCfg); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to write default config file: %v\n", err)
-			os.Exit(1)
+			fatal("Failed to generate default config: %v", err)
 		}
-
-		// 提示用户修改配置后退出程序
-		fmt.Printf("Default config generated!\nPlease edit '%s' with valid Tokens/API Keys and restart the program.\n", *configPath)
+		fmt.Printf("Config generated. Please edit '%s' and restart.\n", *configPath)
 		os.Exit(0)
 	}
 
-	// 加载并解析配置文件
 	cfg, err := internal.LoadConfig(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
+		fatal("Failed to load config: %v", err)
 	}
-
-	// 验证配置文件的合法性（如模式匹配等）
 	if err := cfg.Validate(); err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid config: %v\n", err)
-		os.Exit(1)
+		fatal("Invalid config: %v", err)
 	}
 
-	// 确保数据目录存在
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating data dir: %v\n", err)
-		os.Exit(1)
+		fatal("Failed to create data dir: %v", err)
 	}
 
-	// 根据配置初始化日志系统
 	logger, err := internal.NewLoggerFromConfig(cfg.LogLevel, cfg.GetLogsDir())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error initializing logger: %v\n", err)
-		os.Exit(1)
+		fatal("Failed to init logger: %v", err)
 	}
-	// 设置全局日志单例
 	internal.SetGlobal(logger)
+	defer logger.Close()
 
-	// 初始化核心应用逻辑
-	coreInst, err := internal.NewCore(&internal.CoreConfig{
-		AppConfig: cfg,
-	})
+	core, err := internal.NewCore(&internal.CoreConfig{AppConfig: cfg})
 	if err != nil {
-		internal.Error("main", "Failed to initialize core", map[string]interface{}{
-			"error": err.Error(),
-		})
+		logger.Log(internal.ErrorLevel, "main", "Core initialization failed", map[string]interface{}{"err": err.Error()})
 		os.Exit(1)
 	}
 
-	// 此处应进行具体的平台注册逻辑，通常根据配置动态注册
-	// 示例: if cfg.Platforms["discord"].Enabled { coreInst.Register(...) }
-
-	// 创建带有取消功能的上下文，用于控制生命周期
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 启动核心服务及所有已注册的平台
-	if err := coreInst.Start(ctx); err != nil {
-		internal.Error("main", "Startup failed", map[string]interface{}{
-			"error": err.Error(),
-		})
+	if err := core.Start(ctx); err != nil {
+		logger.Log(internal.ErrorLevel, "main", "Startup failed", map[string]interface{}{"err": err.Error()})
 		os.Exit(1)
 	}
 
-	internal.Info("main", "Relify is running. Press Ctrl+C to stop.", nil)
+	logger.Log(internal.InfoLevel, "main", "Relify is running", map[string]interface{}{"pid": os.Getpid()})
 
-	// 创建信号通道，监听中断信号 (Ctrl+C) 和终止信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// 阻塞直到收到信号
-	<-sigChan
+	sig := <-sigChan
+	logger.Log(internal.InfoLevel, "main", "Signal received, shutting down...", map[string]interface{}{"signal": sig.String()})
 
-	internal.Info("main", "Shutting down...", nil)
-
-	// 创建一个新的带超时的上下文用于优雅关闭
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer shutdownCancel()
 
-	// 执行核心组件的停止逻辑
-	if err := coreInst.Stop(shutdownCtx); err != nil {
-		internal.Error("main", "Shutdown error", map[string]interface{}{
-			"error": err.Error(),
-		})
+	if err := core.Stop(shutdownCtx); err != nil {
+		logger.Log(internal.ErrorLevel, "main", "Shutdown completed with errors", map[string]interface{}{"err": err.Error()})
 		os.Exit(1)
 	}
 
-	internal.Info("main", "Shutdown complete", nil)
+	logger.Log(internal.InfoLevel, "main", "Shutdown successful", nil)
+}
+
+func fatal(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "[FATAL] "+format+"\n", args...)
+	os.Exit(1)
 }

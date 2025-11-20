@@ -3,31 +3,30 @@ package internal
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite" // 引入纯 Go 实现的 SQLite 驱动
+	_ "modernc.org/sqlite"
 )
 
-// Store 处理持久化存储和内存缓存
 type Store struct {
 	db           *sql.DB
-	bindingCache map[string]*RoomBinding // 内存缓存：BindingID -> Binding对象
-	roomIndex    map[string][]string     // 倒排索引：Platform:RoomID -> BindingID列表
-	cacheMu      sync.RWMutex            // 读写锁保护缓存
+	bindingCache map[string]*RoomBinding
+	roomIndex    map[string][]string
+	mu           sync.RWMutex
 	logger       *Logger
+	closeOnce    sync.Once
+	done         chan struct{}
 }
 
-// NewStore 初始化数据库连接并加载缓存
 func NewStore(dbPath string, log *Logger) (*Store, error) {
-	// 配置 SQLite 连接字符串，启用 WAL 模式以提高并发写入性能
-	dsn := dbPath + "?_journal=WAL&_timeout=5000&_busy_timeout=5000&_sync=NORMAL"
+	dsn := fmt.Sprintf("%s?_journal=WAL&_timeout=5000&_sync=NORMAL", dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 
-	// 设置连接池参数
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
 
@@ -36,149 +35,160 @@ func NewStore(dbPath string, log *Logger) (*Store, error) {
 		logger:       log,
 		bindingCache: make(map[string]*RoomBinding),
 		roomIndex:    make(map[string][]string),
+		done:         make(chan struct{}),
 	}
 
-	// 初始化数据库表结构
 	if err := s.initSchema(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
-	// 预热缓存
 	if err := s.loadCache(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
-	// 启动后台清理任务
 	go s.cleanupLoop()
 	return s, nil
 }
 
-// Close 关闭数据库连接
-func (s *Store) Close() error { return s.db.Close() }
-
-// initSchema 创建必要的数据库表和索引
-func (s *Store) initSchema() error {
-	query := `
-	CREATE TABLE IF NOT EXISTS room_bindings (
-		id TEXT PRIMARY KEY,
-		rooms_json TEXT NOT NULL
-	);
-	CREATE TABLE IF NOT EXISTS message_mappings (
-		source_plat TEXT, source_msg TEXT,
-		target_plat TEXT, target_msg TEXT,
-		binding_id TEXT, created_at INTEGER,
-		PRIMARY KEY (source_plat, source_msg, target_plat, binding_id)
-	);
-	CREATE INDEX IF NOT EXISTS idx_mapping_lookup ON message_mappings(source_plat, source_msg);
-	CREATE TABLE IF NOT EXISTS user_mappings (
-		source_plat TEXT, source_user TEXT,
-		target_plat TEXT, target_user TEXT,
-		PRIMARY KEY (source_plat, source_user, target_plat)
-	);
-	`
-	_, err := s.db.Exec(query)
-	return err
+func (s *Store) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.done)
+	})
+	return s.db.Close()
 }
 
-// loadCache 从数据库全量加载绑定关系到内存
-func (s *Store) loadCache() error {
-	rows, err := s.db.Query("SELECT id, rooms_json FROM room_bindings")
-	if err != nil {
-		return err
+func (s *Store) initSchema() error {
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS bindings (id TEXT PRIMARY KEY, name TEXT, created_at INTEGER);`,
+		`CREATE TABLE IF NOT EXISTS binding_rooms (binding_id TEXT, platform TEXT, room_id TEXT, config_json TEXT, PRIMARY KEY (binding_id, platform, room_id));`,
+		`CREATE INDEX IF NOT EXISTS idx_binding_lookup ON binding_rooms(platform, room_id);`,
+		`CREATE TABLE IF NOT EXISTS message_mappings (
+			source_plat TEXT, source_msg TEXT,
+			target_plat TEXT, target_msg TEXT,
+			binding_id TEXT, created_at INTEGER,
+			PRIMARY KEY (source_plat, source_msg, target_plat)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_mapping_echo ON message_mappings(target_plat, target_msg);`,
+		`CREATE TABLE IF NOT EXISTS users (platform TEXT, user_id TEXT, display_name TEXT, avatar_url TEXT, updated_at INTEGER, PRIMARY KEY (platform, user_id));`,
 	}
-	defer rows.Close()
 
-	s.cacheMu.Lock()
-	defer s.cacheMu.Unlock()
-
-	for rows.Next() {
-		var id, data string
-		if err := rows.Scan(&id, &data); err != nil {
-			return err
-		}
-		b := &RoomBinding{ID: id}
-		// 反序列化 JSON 配置
-		if json.Unmarshal([]byte(data), &b.Rooms) == nil {
-			s.bindingCache[id] = b
-			// 构建倒排索引以便快速查找
-			for _, r := range b.Rooms {
-				key := r.Platform + ":" + r.RoomID
-				s.roomIndex[key] = append(s.roomIndex[key], id)
-			}
+	for _, q := range queries {
+		if _, err := s.db.Exec(q); err != nil {
+			return fmt.Errorf("schema error: %w", err)
 		}
 	}
 	return nil
 }
 
-// GetBindingsByRoom 根据平台和房间ID查找关联的绑定配置
-func (s *Store) GetBindingsByRoom(platform, roomID string) []*RoomBinding {
-	s.cacheMu.RLock()
-	defer s.cacheMu.RUnlock()
+func (s *Store) loadCache() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// 查找索引
-	ids := s.roomIndex[platform+":"+roomID]
-	if len(ids) == 0 {
-		return nil
-	}
-
-	res := make([]*RoomBinding, 0, len(ids))
-	for _, id := range ids {
-		if b, ok := s.bindingCache[id]; ok {
-			res = append(res, b)
-		}
-	}
-	return res
-}
-
-// SaveBinding 保存或更新绑定配置，并刷新缓存
-func (s *Store) SaveBinding(b *RoomBinding) error {
-	data, _ := json.Marshal(b.Rooms)
-	_, err := s.db.Exec("INSERT OR REPLACE INTO room_bindings (id, rooms_json) VALUES (?, ?)", b.ID, string(data))
+	bRows, err := s.db.Query("SELECT id, name FROM bindings")
 	if err != nil {
 		return err
 	}
+	defer bRows.Close()
 
-	// 简单策略：更新后重新全量加载缓存以保证一致性
-	return s.loadCache()
+	for bRows.Next() {
+		var b RoomBinding
+		if err := bRows.Scan(&b.ID, &b.Name); err != nil {
+			continue
+		}
+		s.bindingCache[b.ID] = &b
+	}
+
+	rRows, err := s.db.Query("SELECT binding_id, platform, room_id, config_json FROM binding_rooms")
+	if err != nil {
+		return err
+	}
+	defer rRows.Close()
+
+	for rRows.Next() {
+		var bid, plat, rid, cfgStr string
+		if err := rRows.Scan(&bid, &plat, &rid, &cfgStr); err != nil {
+			continue
+		}
+
+		if binding, exists := s.bindingCache[bid]; exists {
+			var cfg map[string]interface{}
+			_ = json.Unmarshal([]byte(cfgStr), &cfg)
+
+			binding.Rooms = append(binding.Rooms, BoundRoom{
+				Platform: plat,
+				RoomID:   rid,
+				Config:   cfg,
+			})
+
+			key := plat + ":" + rid
+			s.roomIndex[key] = append(s.roomIndex[key], bid)
+		}
+	}
+	return nil
 }
 
-// GetTargetMessageID 查询消息映射，用于处理回复功能
+func (s *Store) GetBindingsByRoom(platform, roomID string) []*RoomBinding {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ids := s.roomIndex[platform+":"+roomID]
+	result := make([]*RoomBinding, 0, len(ids))
+	for _, id := range ids {
+		if b, ok := s.bindingCache[id]; ok {
+			result = append(result, b)
+		}
+	}
+	return result
+}
+
+func (s *Store) IsEventEcho(platform, msgID string) bool {
+	var dummy int
+	err := s.db.QueryRow("SELECT 1 FROM message_mappings WHERE target_plat=? AND target_msg=? LIMIT 1", platform, msgID).Scan(&dummy)
+	return err == nil
+}
+
 func (s *Store) GetTargetMessageID(srcPlat, srcMsg, tgtPlat string) (string, bool) {
 	var tgtMsg string
-	err := s.db.QueryRow(
-		"SELECT target_msg FROM message_mappings WHERE source_plat=? AND source_msg=? AND target_plat=?",
-		srcPlat, srcMsg, tgtPlat,
-	).Scan(&tgtMsg)
+	err := s.db.QueryRow("SELECT target_msg FROM message_mappings WHERE source_plat=? AND source_msg=? AND target_plat=?", srcPlat, srcMsg, tgtPlat).Scan(&tgtMsg)
 	return tgtMsg, err == nil
 }
 
-// SaveMessageMapping 记录源消息与目标消息的映射关系
-func (s *Store) SaveMessageMapping(srcPlat, srcMsg, tgtPlat, tgtMsg, bindID string) error {
-	_, err := s.db.Exec(
-		"INSERT OR IGNORE INTO message_mappings VALUES (?, ?, ?, ?, ?, ?)",
-		srcPlat, srcMsg, tgtPlat, tgtMsg, bindID, time.Now().Unix(),
-	)
-	return err
+func (s *Store) SaveMessageMapping(srcPlat, srcMsg, tgtPlat, tgtMsg, bindID string) {
+	go func() {
+		_, err := s.db.Exec(
+			"INSERT OR IGNORE INTO message_mappings (source_plat, source_msg, target_plat, target_msg, binding_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			srcPlat, srcMsg, tgtPlat, tgtMsg, bindID, time.Now().Unix(),
+		)
+		if err != nil {
+			s.logger.Log(WarnLevel, "store", "failed to save mapping", map[string]interface{}{"err": err.Error()})
+		}
+	}()
 }
 
-// GetTargetUserID 查询用户映射（如果存在）
-func (s *Store) GetTargetUserID(srcPlat, srcUser, tgtPlat string) (string, bool) {
-	var tgtUser string
-	err := s.db.QueryRow(
-		"SELECT target_user FROM user_mappings WHERE source_plat=? AND source_user=? AND target_plat=?",
-		srcPlat, srcUser, tgtPlat,
-	).Scan(&tgtUser)
-	return tgtUser, err == nil
+func (s *Store) UpdateUserCache(platform, userID, name, avatar string) {
+	go func() {
+		_, _ = s.db.Exec(
+			"INSERT OR REPLACE INTO users (platform, user_id, display_name, avatar_url, updated_at) VALUES (?, ?, ?, ?, ?)",
+			platform, userID, name, avatar, time.Now().Unix(),
+		)
+	}()
 }
 
-// cleanupLoop 定期清理过期的消息映射记录
 func (s *Store) cleanupLoop() {
-	ticker := time.NewTicker(1 * time.Hour)
-	for range ticker.C {
-		// 设置过期时间为 3 天前
-		expire := time.Now().Add(-72 * time.Hour).Unix()
-		s.db.Exec("DELETE FROM message_mappings WHERE created_at < ?", expire)
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			expire := time.Now().Add(-7 * 24 * time.Hour).Unix()
+			if _, err := s.db.Exec("DELETE FROM message_mappings WHERE created_at < ?", expire); err != nil {
+				s.logger.Log(ErrorLevel, "store", "cleanup failed", map[string]interface{}{"err": err.Error()})
+			}
+		}
 	}
 }
