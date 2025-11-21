@@ -1,17 +1,11 @@
 package adapter
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,24 +18,21 @@ import (
 )
 
 type QQConfig struct {
-	Protocol    string `yaml:"protocol"`
-	APIURL      string `yaml:"api_url"`
-	ListenAddr  string `yaml:"listen_addr"`
-	AccessToken string `yaml:"access_token"`
-	Secret      string `yaml:"secret"`
-	BridgeGroup string `yaml:"bridge_group"`
+	Protocol string `yaml:"protocol"`
+	URL      string `yaml:"url"`
+	Secret   string `yaml:"secret"`
+	Group    string `yaml:"group"`
 }
 
 type QQAdapter struct {
-	cfg        QQConfig
-	handler    internal.InboundHandler
-	httpServer *http.Server
-	wsConn     *websocket.Conn
-	wsMu       sync.Mutex
-	httpClient *http.Client
-	selfID     string
-	selfIDMu   sync.RWMutex
-	echoMap    sync.Map
+	cfg      QQConfig
+	handler  internal.InboundHandler
+	wsConn   *websocket.Conn
+	wsMu     sync.Mutex
+	selfID   string
+	selfIDMu sync.RWMutex
+	echoMap  sync.Map
+	closeCh  chan struct{}
 }
 
 func NewQQAdapter(node yaml.Node, handler internal.InboundHandler) (*QQAdapter, error) {
@@ -50,13 +41,13 @@ func NewQQAdapter(node yaml.Node, handler internal.InboundHandler) (*QQAdapter, 
 		return nil, err
 	}
 	if cfg.Protocol == "" {
-		cfg.Protocol = "http"
+		cfg.Protocol = "ws"
 	}
 
 	return &QQAdapter{
-		cfg:        cfg,
-		handler:    handler,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		cfg:     cfg,
+		handler: handler,
+		closeCh: make(chan struct{}),
 	}, nil
 }
 
@@ -65,31 +56,21 @@ func (q *QQAdapter) Name() string { return "qq" }
 func (q *QQAdapter) GetBotUserID() string {
 	q.selfIDMu.RLock()
 	defer q.selfIDMu.RUnlock()
-	if q.selfID == "" {
-		return "0"
-	}
 	return q.selfID
 }
 
 func (q *QQAdapter) GetRouteType() internal.RouteType { return internal.RouteTypeAggregate }
 
 func (q *QQAdapter) Start(ctx context.Context) error {
-	switch q.cfg.Protocol {
-	case "http":
-		return q.startHTTP(ctx)
-	case "ws":
-		return q.startWS(ctx)
-	case "reverse_ws":
-		return q.startReverseWS(ctx)
-	default:
-		return fmt.Errorf("unknown protocol: %s", q.cfg.Protocol)
+	if q.cfg.Protocol == "ws" || strings.HasPrefix(q.cfg.URL, "ws") {
+		go q.connectWS(ctx)
+		return nil
 	}
+	return fmt.Errorf("only ws protocol is fully supported in this simplified mode")
 }
 
 func (q *QQAdapter) Stop(ctx context.Context) error {
-	if q.httpServer != nil {
-		return q.httpServer.Shutdown(ctx)
-	}
+	close(q.closeCh)
 	q.wsMu.Lock()
 	if q.wsConn != nil {
 		q.wsConn.Close()
@@ -98,166 +79,85 @@ func (q *QQAdapter) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (q *QQAdapter) fetchBotInfo() {
-	go func() {
-		for i := 0; i < 10; i++ {
-			resp, err := q.callAPI("get_login_info", nil)
-			if err == nil {
-				var res struct {
-					Data struct {
-						UserID int64 `json:"user_id"`
-					} `json:"data"`
-				}
-				if json.Unmarshal(resp, &res) == nil && res.Data.UserID != 0 {
-					q.selfIDMu.Lock()
-					q.selfID = strconv.FormatInt(res.Data.UserID, 10)
-					q.selfIDMu.Unlock()
-					slog.Info("qq bot info fetched", "id", q.selfID)
-					return
-				}
-			}
-			time.Sleep(3 * time.Second)
-		}
-	}()
-}
-
-func (q *QQAdapter) startHTTP(ctx context.Context) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", q.handleHTTPEvent)
-	q.httpServer = &http.Server{Addr: q.cfg.ListenAddr, Handler: mux}
-
-	go func() {
-		slog.Info("qq http listening", "addr", q.cfg.ListenAddr)
-		q.fetchBotInfo()
-		if err := q.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("qq http server error", "err", err)
-		}
-	}()
-	return nil
-}
-
-func (q *QQAdapter) handleHTTPEvent(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	if q.cfg.Secret != "" {
-		sig := r.Header.Get("X-Signature")
-		if sig == "" {
-			w.WriteHeader(http.StatusUnauthorized)
+func (q *QQAdapter) connectWS(ctx context.Context) {
+	for {
+		select {
+		case <-q.closeCh:
 			return
-		}
-		mac := hmac.New(sha1.New, []byte(q.cfg.Secret))
-		mac.Write(body)
-		expected := "sha1=" + hex.EncodeToString(mac.Sum(nil))
-		if !hmac.Equal([]byte(sig), []byte(expected)) {
-			w.WriteHeader(http.StatusForbidden)
+		case <-ctx.Done():
 			return
+		default:
 		}
-	}
-	q.processEventBytes(context.Background(), body)
-	w.WriteHeader(http.StatusNoContent)
-}
 
-func (q *QQAdapter) startWS(ctx context.Context) error {
-	header := http.Header{}
-	if q.cfg.AccessToken != "" {
-		header.Set("Authorization", "Bearer "+q.cfg.AccessToken)
-	}
-	conn, _, err := websocket.DefaultDialer.Dial(q.cfg.APIURL, header)
-	if err != nil {
-		return err
-	}
-	q.wsMu.Lock()
-	q.wsConn = conn
-	q.wsMu.Unlock()
-
-	go q.wsListenLoop()
-	q.fetchBotInfo()
-	return nil
-}
-
-func (q *QQAdapter) startReverseWS(ctx context.Context) error {
-	mux := http.NewServeMux()
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if q.cfg.AccessToken != "" {
-			auth := r.Header.Get("Authorization")
-			token := strings.TrimPrefix(auth, "Bearer ")
-			if token != q.cfg.AccessToken && r.URL.Query().Get("access_token") != q.cfg.AccessToken {
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
+		slog.Info("connecting to qq onebot", "url", q.cfg.URL)
+		header := http.Header{}
+		if q.cfg.Secret != "" {
+			header.Set("Authorization", "Bearer "+q.cfg.Secret)
 		}
-		conn, err := upgrader.Upgrade(w, r, nil)
+
+		conn, _, err := websocket.DefaultDialer.Dial(q.cfg.URL, header)
 		if err != nil {
-			slog.Error("ws upgrade failed", "err", err)
-			return
+			slog.Error("failed to connect qq ws", "err", err)
+			time.Sleep(5 * time.Second)
+			continue
 		}
+
 		q.wsMu.Lock()
-		if q.wsConn != nil {
-			q.wsConn.Close()
-		}
 		q.wsConn = conn
 		q.wsMu.Unlock()
-		slog.Info("qq reverse ws connected", "remote", r.RemoteAddr)
-		go q.wsListenLoop()
-		q.fetchBotInfo()
-	})
+		slog.Info("qq ws connected")
 
-	q.httpServer = &http.Server{Addr: q.cfg.ListenAddr, Handler: mux}
-	go func() {
-		slog.Info("qq reverse ws listening", "addr", q.cfg.ListenAddr)
-		if err := q.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("qq reverse ws server error", "err", err)
+		q.fetchBotInfo()
+
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				slog.Error("qq ws disconnected", "err", err)
+				break
+			}
+
+			var resp struct {
+				Echo string `json:"echo"`
+			}
+			if json.Unmarshal(message, &resp) == nil && resp.Echo != "" {
+				if ch, ok := q.echoMap.Load(resp.Echo); ok {
+					ch.(chan []byte) <- message
+				}
+				continue
+			}
+			go q.processEventBytes(context.Background(), message)
 		}
-	}()
-	return nil
+
+		q.wsMu.Lock()
+		q.wsConn = nil
+		q.wsMu.Unlock()
+		time.Sleep(3 * time.Second)
+	}
 }
 
-func (q *QQAdapter) wsListenLoop() {
-	for {
-		q.wsMu.Lock()
-		conn := q.wsConn
-		q.wsMu.Unlock()
-		if conn == nil {
-			time.Sleep(time.Second)
-			continue
-		}
-		_, message, err := conn.ReadMessage()
-		if err != nil {
-			slog.Error("ws read error", "err", err)
-			q.wsMu.Lock()
-			if q.wsConn == conn {
-				q.wsConn.Close()
-				q.wsConn = nil
+func (q *QQAdapter) fetchBotInfo() {
+	go func() {
+		time.Sleep(1 * time.Second)
+		resp, err := q.callAPI("get_login_info", nil)
+		if err == nil {
+			var res struct {
+				Data struct {
+					UserID int64 `json:"user_id"`
+				} `json:"data"`
 			}
-			q.wsMu.Unlock()
-			return
-		}
-		var resp struct {
-			Echo string `json:"echo"`
-		}
-		if json.Unmarshal(message, &resp) == nil && resp.Echo != "" {
-			if ch, ok := q.echoMap.Load(resp.Echo); ok {
-				ch.(chan []byte) <- message
+			if json.Unmarshal(resp, &res) == nil && res.Data.UserID != 0 {
+				q.selfIDMu.Lock()
+				q.selfID = strconv.FormatInt(res.Data.UserID, 10)
+				q.selfIDMu.Unlock()
+				slog.Info("qq bot info fetched", "id", q.selfID)
 			}
-			continue
 		}
-		q.processEventBytes(context.Background(), message)
-	}
+	}()
 }
 
 type onebotEvent struct {
 	PostType    string          `json:"post_type"`
 	MessageType string          `json:"message_type"`
-	SubType     string          `json:"sub_type"`
 	Time        int64           `json:"time"`
 	UserID      int64           `json:"user_id"`
 	GroupID     int64           `json:"group_id"`
@@ -278,12 +178,10 @@ func (q *QQAdapter) processEventBytes(ctx context.Context, data []byte) {
 		return
 	}
 
-	bridgeGroupID, err := strconv.ParseInt(q.cfg.BridgeGroup, 10, 64)
+	bridgeGroupID, err := strconv.ParseInt(q.cfg.Group, 10, 64)
 	if err != nil || evt.GroupID != bridgeGroupID {
 		return
 	}
-
-	roomID := internal.AggregateRoomKey
 
 	senderName := evt.Sender.Card
 	if senderName == "" {
@@ -300,7 +198,7 @@ func (q *QQAdapter) processEventBytes(ctx context.Context, data []byte) {
 		Timestamp: time.Unix(evt.Time, 0),
 		Message: &internal.Message{
 			ID:           strconv.Itoa(int(evt.MessageID)),
-			RoomID:       roomID,
+			RoomID:       q.cfg.Group,
 			SenderID:     strconv.FormatInt(evt.UserID, 10),
 			SenderName:   senderName,
 			SenderAvatar: fmt.Sprintf("https://q1.qlogo.cn/g?b=qq&nk=%d&s=640", evt.UserID),
@@ -336,17 +234,12 @@ func (q *QQAdapter) parseOneBotMessage(raw json.RawMessage) []internal.Segment {
 }
 
 func (q *QQAdapter) SendMessage(ctx context.Context, msg *internal.OutMessage) (string, error) {
-	if q.cfg.BridgeGroup == "" {
-		return "", fmt.Errorf("bridge_group not configured")
-	}
-
-	// Convert BridgeGroup string to int64 for API call
-	bridgeGroupID, err := strconv.ParseInt(q.cfg.BridgeGroup, 10, 64)
+	groupID, err := strconv.ParseInt(msg.TargetRoomID, 10, 64)
 	if err != nil {
-		return "", fmt.Errorf("invalid bridge_group: %w", err)
+		return "", fmt.Errorf("invalid target room id: %s", msg.TargetRoomID)
 	}
 
-	params := map[string]interface{}{"group_id": bridgeGroupID}
+	params := map[string]interface{}{"group_id": groupID}
 
 	var obMsg []map[string]interface{}
 	if msg.Message.ReplyToID != "" {
@@ -385,22 +278,6 @@ func (q *QQAdapter) SendMessage(ctx context.Context, msg *internal.OutMessage) (
 }
 
 func (q *QQAdapter) callAPI(action string, params interface{}) ([]byte, error) {
-	if q.cfg.Protocol == "http" {
-		data, _ := json.Marshal(params)
-		u, _ := url.JoinPath(q.cfg.APIURL, action)
-		req, _ := http.NewRequest("POST", u, bytes.NewBuffer(data))
-		req.Header.Set("Content-Type", "application/json")
-		if q.cfg.AccessToken != "" {
-			req.Header.Set("Authorization", "Bearer "+q.cfg.AccessToken)
-		}
-		resp, err := q.httpClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		return io.ReadAll(resp.Body)
-	}
-
 	q.wsMu.Lock()
 	conn := q.wsConn
 	q.wsMu.Unlock()
@@ -430,31 +307,33 @@ func (q *QQAdapter) callAPI(action string, params interface{}) ([]byte, error) {
 }
 
 func (q *QQAdapter) EditMessage(ctx context.Context, msg *internal.OutMessage) error { return nil }
+
 func (q *QQAdapter) DeleteMessage(ctx context.Context, roomID, msgID string) error {
 	mid, _ := strconv.Atoi(msgID)
 	_, err := q.callAPI("delete_msg", map[string]interface{}{"message_id": mid})
 	return err
 }
+
 func (q *QQAdapter) UploadFile(ctx context.Context, data []byte, filename string) (string, error) {
 	return "", fmt.Errorf("not implemented")
 }
+
 func (q *QQAdapter) CreateRoom(ctx context.Context, info *internal.RoomInfo) (string, error) {
-	return "", fmt.Errorf("not supported")
+	if q.cfg.Group == "" {
+		return "", fmt.Errorf("qq group not configured")
+	}
+	return q.cfg.Group, nil
 }
 
 func (q *QQAdapter) GetRoomInfo(ctx context.Context, roomID string) (*internal.RoomInfo, error) {
-	if q.cfg.BridgeGroup == "" {
-		return &internal.RoomInfo{ID: roomID, Name: "QQ Bridge"}, nil
-	}
-
-	gid, err := strconv.ParseInt(q.cfg.BridgeGroup, 10, 64)
+	gid, err := strconv.ParseInt(roomID, 10, 64)
 	if err != nil {
-		return &internal.RoomInfo{ID: roomID, Name: "QQ Bridge"}, nil
+		return &internal.RoomInfo{ID: roomID, Name: "QQ Group"}, nil
 	}
 
 	info := &internal.RoomInfo{
 		ID:        roomID,
-		Name:      q.cfg.BridgeGroup,
+		Name:      roomID,
 		AvatarURL: fmt.Sprintf("https://p.qlogo.cn/gh/%d/%d/100", gid, gid),
 	}
 

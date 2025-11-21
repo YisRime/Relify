@@ -38,17 +38,13 @@ func (r *Router) HandleEvent(ctx context.Context, event *Event) error {
 	r.store.SaveEvent(event)
 	r.store.UpdateUserCache(event.Platform, event.Message.SenderID, event.Message.SenderName, event.Message.SenderAvatar)
 
-	lookupKey := event.Message.RoomID
 	srcAdapter, ok := r.registry.Get(event.Platform)
 	if !ok {
 		return nil
 	}
 
-	if srcAdapter.GetRouteType() == RouteTypeAggregate {
-		lookupKey = AggregateRoomKey
-	}
+	bindings := r.store.GetBindingsByRoom(event.Platform, event.Message.RoomID)
 
-	bindings := r.store.GetBindingsByRoom(event.Platform, lookupKey)
 	if len(bindings) == 0 {
 		var err error
 		if bindings, err = r.resolveBinding(ctx, event, srcAdapter); err != nil {
@@ -60,9 +56,10 @@ func (r *Router) HandleEvent(ctx context.Context, event *Event) error {
 	var wg sync.WaitGroup
 	for _, b := range bindings {
 		for _, tr := range b.Rooms {
-			if tr.Platform == event.Platform && tr.RoomID == lookupKey {
+			if tr.Platform == event.Platform {
 				continue
 			}
+
 			if adapter, ok := r.registry.Get(tr.Platform); ok {
 				wg.Add(1)
 				go func(tr BoundRoom, bid string) {
@@ -77,66 +74,67 @@ func (r *Router) HandleEvent(ctx context.Context, event *Event) error {
 }
 
 func (r *Router) resolveBinding(ctx context.Context, event *Event, srcAdapter Platform) ([]*RoomBinding, error) {
-	if r.cfg.Mode != "hub" {
-		return r.resolvePeerBinding(ctx, event)
-	}
-
-	hubName := r.cfg.HubPlatform
-	if event.Platform == hubName {
+	if r.cfg.Mode == "hub" && event.Platform == r.cfg.HubPlatform {
 		return nil, nil
 	}
 
-	hub, ok := r.registry.Get(hubName)
-	if !ok {
-		return nil, fmt.Errorf("hub offline")
-	}
-
-	var targetName string
 	srcInfo, _ := srcAdapter.GetRoomInfo(ctx, event.Message.RoomID)
 	if srcInfo == nil {
 		srcInfo = &RoomInfo{Name: event.Message.RoomID}
 	}
 
-	if srcAdapter.GetRouteType() == RouteTypeAggregate {
-		targetName = fmt.Sprintf("All-%s", event.Platform)
+	boundRooms := []BoundRoom{
+		{Platform: event.Platform, RoomID: event.Message.RoomID},
+	}
+	bindingName := ""
+
+	if r.cfg.Mode == "hub" {
+		hubName := r.cfg.HubPlatform
+		hub, ok := r.registry.Get(hubName)
+		if !ok {
+			return nil, fmt.Errorf("hub platform %s offline", hubName)
+		}
+
+		targetName := fmt.Sprintf("[%s] %s", srcAdapter.Name(), srcInfo.Name)
+		tid, err := hub.CreateRoom(ctx, &RoomInfo{Name: targetName, Topic: "Bridged via Relify (Hub Mode)"})
+		if err != nil {
+			return nil, err
+		}
+		boundRooms = append(boundRooms, BoundRoom{Platform: hubName, RoomID: tid})
+		bindingName = fmt.Sprintf("Hub: %s <-> %s", event.Platform, hubName)
+
 	} else {
-		targetName = fmt.Sprintf("[%s] %s", srcAdapter.Name(), srcInfo.Name)
+		baseName := fmt.Sprintf("%s-%s", event.Platform, srcInfo.Name)
+
+		for name, p := range r.registry.All() {
+			if name == event.Platform {
+				continue
+			}
+
+			targetRoomName := baseName
+			if p.GetRouteType() == RouteTypeAggregate {
+				targetRoomName = "Aggregate Group"
+			}
+
+			tid, err := p.CreateRoom(ctx, &RoomInfo{Name: targetRoomName, Topic: "Bridged via Relify (Peer Mode)"})
+			if err == nil {
+				boundRooms = append(boundRooms, BoundRoom{Platform: name, RoomID: tid})
+			} else {
+				slog.Warn("failed to bridge to peer", "platform", name, "err", err)
+			}
+		}
+		bindingName = fmt.Sprintf("Peer: %s -> All", event.Platform)
 	}
 
-	tid, err := hub.CreateRoom(ctx, &RoomInfo{Name: targetName, Topic: "Bridged via Relify"})
+	if len(boundRooms) < 2 {
+		return nil, fmt.Errorf("not enough targets to bind")
+	}
+
+	b, err := r.store.CreateDynamicBinding(bindingName, boundRooms)
 	if err != nil {
 		return nil, err
 	}
-
-	rooms := []BoundRoom{
-		{Platform: event.Platform, RoomID: event.Message.RoomID},
-		{Platform: hubName, RoomID: tid},
-	}
-	if srcAdapter.GetRouteType() == RouteTypeAggregate {
-		rooms[0].RoomID = AggregateRoomKey
-	}
-
-	b, err := r.store.CreateDynamicBinding(fmt.Sprintf("Auto: %s", targetName), rooms)
-	return []*RoomBinding{b}, err
-}
-
-func (r *Router) resolvePeerBinding(ctx context.Context, event *Event) ([]*RoomBinding, error) {
-	targetRooms := []BoundRoom{{Platform: event.Platform, RoomID: event.Message.RoomID}}
-	roomName := fmt.Sprintf("%s-%s", event.Platform, event.Message.RoomID)
-
-	for name, p := range r.registry.All() {
-		if name == event.Platform {
-			continue
-		}
-		if tid, err := p.CreateRoom(ctx, &RoomInfo{Name: roomName}); err == nil {
-			targetRooms = append(targetRooms, BoundRoom{Platform: name, RoomID: tid})
-		}
-	}
-	if len(targetRooms) < 2 {
-		return nil, fmt.Errorf("no peers")
-	}
-	b, err := r.store.CreateDynamicBinding("Peer: "+roomName, targetRooms)
-	return []*RoomBinding{b}, err
+	return []*RoomBinding{b}, nil
 }
 
 func (r *Router) dispatch(ctx context.Context, adapter Platform, event *Event, tRoom BoundRoom, bindID string) {
@@ -148,8 +146,13 @@ func (r *Router) dispatch(ctx context.Context, adapter Platform, event *Event, t
 	}
 
 	outMsg := r.deepCopyMessage(event.Message)
+
 	if outMsg.ReplyToID != "" {
-		outMsg.ReplyToID, _ = r.store.GetTargetMessageID(event.Platform, outMsg.ReplyToID, tRoom.Platform)
+		if tgtID, ok := r.store.GetTargetMessageID(event.Platform, outMsg.ReplyToID, tRoom.Platform); ok {
+			outMsg.ReplyToID = tgtID
+		} else {
+			outMsg.ReplyToID = ""
+		}
 	}
 
 	payload := &OutMessage{

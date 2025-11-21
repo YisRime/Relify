@@ -53,14 +53,14 @@ func SaveConfig(path string, cfg *Config) error {
 
 func GenerateDefault() *Config {
 	var qqConfig, matrixConfig yaml.Node
+
 	qqConfig.Encode(map[string]interface{}{
-		"protocol":     "ws",
-		"api_url":      "ws://localhost:3001",
-		"listen_addr":  "localhost:8080",
-		"access_token": "",
-		"secret":       "",
-		"bridge_group": "",
+		"protocol": "ws",
+		"url":      "ws://localhost:3001",
+		"secret":   "",
+		"group":    "",
 	})
+
 	matrixConfig.Encode(map[string]interface{}{
 		"homeserver_url":   "http://localhost:8448",
 		"domain":           "localhost",

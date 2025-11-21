@@ -48,7 +48,7 @@ func NewStore(dbPath string) (*Store, error) {
 
 	s := &Store{
 		db:        db,
-		opChan:    make(chan dbOp, 2000), // 增大缓冲
+		opChan:    make(chan dbOp, 2000),
 		closeChan: make(chan struct{}),
 	}
 	s.wg.Add(1)
