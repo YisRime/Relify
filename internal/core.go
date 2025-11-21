@@ -17,12 +17,10 @@ func NewPlatformRegistry() *PlatformRegistry {
 }
 
 func (r *PlatformRegistry) Register(p Platform) { r.platforms[p.Name()] = p }
-
 func (r *PlatformRegistry) Get(name string) (Platform, bool) {
 	p, ok := r.platforms[name]
 	return p, ok
 }
-
 func (r *PlatformRegistry) All() map[string]Platform { return r.platforms }
 
 type Core struct {
@@ -33,50 +31,42 @@ type Core struct {
 }
 
 func NewCore(cfg *Config) (*Core, error) {
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
-		return nil, err
-	}
+	os.MkdirAll(cfg.DataDir, 0755)
 
-	logLevel := slog.LevelInfo
+	lvl := slog.LevelInfo
 	if cfg.LogLevel == "debug" {
-		logLevel = slog.LevelDebug
+		lvl = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
-	slog.SetDefault(logger)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})))
 
-	storeInstance, err := NewStore(cfg.GetDatabasePath())
+	store, err := NewStore(cfg.GetDatabasePath())
 	if err != nil {
 		return nil, fmt.Errorf("store init: %w", err)
 	}
 
 	reg := NewPlatformRegistry()
-	router := NewRouter(cfg, reg, storeInstance)
-
 	return &Core{
 		Config:   cfg,
-		Router:   router,
+		Router:   NewRouter(cfg, reg, store),
 		Registry: reg,
-		Store:    storeInstance,
+		Store:    store,
 	}, nil
 }
 
 func (c *Core) RegisterPlatform(p Platform) {
-	name := p.Name()
-	pCfg, ok := c.Config.Platforms[name]
-	if !ok || !pCfg.Enabled {
-		return
+	if pCfg, ok := c.Config.Platforms[p.Name()]; ok && pCfg.Enabled {
+		c.Registry.Register(p)
+		slog.Info("platform loaded", "name", p.Name())
 	}
-	c.Registry.Register(p)
-	slog.Info("platform registered", "name", name, "type", p.GetRouteType())
 }
 
 func (c *Core) Start(ctx context.Context) error {
-	var active int
+	active := 0
 	for name, p := range c.Registry.All() {
 		if err := p.Start(ctx); err != nil {
-			slog.Error("platform start failed", "name", name, "err", err)
+			slog.Error("platform failed", "name", name, "err", err)
 			if c.Config.Mode == "hub" && c.Config.HubPlatform == name {
-				return fmt.Errorf("hub platform died: %w", err)
+				return fmt.Errorf("hub platform failed: %w", err)
 			}
 		} else {
 			active++
@@ -85,7 +75,6 @@ func (c *Core) Start(ctx context.Context) error {
 	if active == 0 {
 		return fmt.Errorf("no platforms active")
 	}
-	slog.Info("core running", "mode", c.Config.Mode)
 	return nil
 }
 
@@ -95,7 +84,7 @@ func (c *Core) Stop(ctx context.Context) error {
 		wg.Add(1)
 		go func(p Platform) {
 			defer wg.Done()
-			_ = p.Stop(ctx)
+			p.Stop(ctx)
 		}(p)
 	}
 	wg.Wait()

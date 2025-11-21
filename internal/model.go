@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const AggregateRoomKey = "AGGREGATE"
@@ -23,7 +25,6 @@ const (
 	TypeVideo   = "video"
 	TypeFile    = "file"
 	TypeMention = "mention"
-	TypeReply   = "reply"
 )
 
 type RouteType string
@@ -43,15 +44,11 @@ func (s *Segment) Validate() error {
 	switch s.Type {
 	case TypeImage, TypeVideo, TypeAudio, TypeFile:
 		if GetString(s.Data, "url") == "" {
-			return fmt.Errorf("segment type %s requires 'url'", s.Type)
+			return fmt.Errorf("missing url")
 		}
 	case TypeText:
 		if GetString(s.Data, "text") == "" {
-			return fmt.Errorf("text segment requires 'text' content")
-		}
-	case TypeMention:
-		if GetString(s.Data, "id") == "" && GetString(s.Data, "name") == "" {
-			return fmt.Errorf("mention segment requires 'id' or 'name'")
+			return fmt.Errorf("missing text")
 		}
 	}
 	return nil
@@ -95,18 +92,12 @@ type Message struct {
 }
 
 func (m *Message) Validate() error {
-	if m.ID == "" {
-		return fmt.Errorf("message id is empty")
+	if m.ID == "" || m.RoomID == "" || len(m.Body) == 0 {
+		return fmt.Errorf("invalid message structure")
 	}
-	if m.RoomID == "" {
-		return fmt.Errorf("room id is empty")
-	}
-	if len(m.Body) == 0 {
-		return fmt.Errorf("message body is empty")
-	}
-	for i, seg := range m.Body {
+	for _, seg := range m.Body {
 		if err := seg.Validate(); err != nil {
-			return fmt.Errorf("segment[%d] invalid: %w", i, err)
+			return err
 		}
 	}
 	return nil
@@ -139,6 +130,20 @@ type BoundRoom struct {
 	Config   map[string]interface{}
 }
 
+type Config struct {
+	DataDir     string                    `yaml:"data_dir"`
+	LogLevel    string                    `yaml:"log_level"`
+	Mode        string                    `yaml:"mode"`
+	HubPlatform string                    `yaml:"hub_platform"`
+	Platforms   map[string]PlatformConfig `yaml:"platforms"`
+}
+
+type PlatformConfig struct {
+	Type    string    `yaml:"type"`
+	Enabled bool      `yaml:"enabled"`
+	Config  yaml.Node `yaml:"config"`
+}
+
 func GetString(data map[string]interface{}, key string) string {
 	if v, ok := data[key]; ok {
 		if s, ok := v.(string); ok {
@@ -146,18 +151,4 @@ func GetString(data map[string]interface{}, key string) string {
 		}
 	}
 	return ""
-}
-
-func GetInt64(data map[string]interface{}, key string) int64 {
-	if v, ok := data[key]; ok {
-		switch n := v.(type) {
-		case int:
-			return int64(n)
-		case int64:
-			return n
-		case float64:
-			return int64(n)
-		}
-	}
-	return 0
 }

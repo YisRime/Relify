@@ -7,20 +7,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type Config struct {
-	DataDir     string                    `yaml:"data_dir"`
-	LogLevel    string                    `yaml:"log_level"`
-	Mode        string                    `yaml:"mode"`
-	HubPlatform string                    `yaml:"hub_platform"`
-	Platforms   map[string]PlatformConfig `yaml:"platforms"`
-}
-
-type PlatformConfig struct {
-	Type    string                 `yaml:"type"`
-	Enabled bool                   `yaml:"enabled"`
-	Config  map[string]interface{} `yaml:"config"`
-}
-
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
