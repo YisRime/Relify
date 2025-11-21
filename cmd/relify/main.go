@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"Relify/internal"
+	"Relify/internal/adapter"
 )
 
 func main() {
@@ -38,6 +39,14 @@ func main() {
 		panic(fmt.Sprintf("Core init failed: %v", err))
 	}
 
+	if matCfg, ok := cfg.Platforms["matrix"]; ok && matCfg.Enabled {
+		matAdapter, err := adapter.NewMatrixAdapter(matCfg.Config, core.Router)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create matrix adapter: %v", err))
+		}
+		core.RegisterPlatform(matAdapter)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := core.Start(ctx); err != nil {
 		fmt.Printf("Core start failed: %v\n", err)
@@ -50,7 +59,6 @@ func main() {
 
 	sig := <-sigChan
 	slog.Info("received signal, shutting down...", "signal", sig)
-
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)

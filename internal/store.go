@@ -28,13 +28,25 @@ func NewStore(dbPath string) (*Store, error) {
 	CREATE TABLE IF NOT EXISTS bindings (id TEXT PRIMARY KEY, name TEXT, created_at INTEGER);
 	CREATE TABLE IF NOT EXISTS binding_rooms (binding_id TEXT, platform TEXT, room_id TEXT, config_json TEXT, PRIMARY KEY (binding_id, platform, room_id));
 	CREATE INDEX IF NOT EXISTS idx_binding_lookup ON binding_rooms(platform, room_id);
+	
 	CREATE TABLE IF NOT EXISTS message_mappings (
 		source_plat TEXT, source_msg TEXT, target_plat TEXT, target_msg TEXT,
 		binding_id TEXT, created_at INTEGER,
 		PRIMARY KEY (source_plat, source_msg, target_plat)
 	);
 	CREATE INDEX IF NOT EXISTS idx_mapping_cleanup ON message_mappings(created_at);
+	
 	CREATE TABLE IF NOT EXISTS users (platform TEXT, user_id TEXT, display_name TEXT, avatar_url TEXT, updated_at INTEGER, PRIMARY KEY (platform, user_id));
+	
+	CREATE TABLE IF NOT EXISTS events (
+		id TEXT PRIMARY KEY,
+		action TEXT,
+		platform TEXT,
+		room_id TEXT,
+		timestamp INTEGER,
+		event_json TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -48,12 +60,29 @@ func NewStore(dbPath string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+func (s *Store) SaveEvent(event *Event) error {
+	if event == nil || event.Message == nil {
+		return nil
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	go func() {
+		_, err := s.db.Exec("INSERT INTO events (id, action, platform, room_id, timestamp, event_json) VALUES (?, ?, ?, ?, ?, ?)",
+			event.ID, string(event.Action), event.Platform, event.Message.RoomID, event.Timestamp.UnixMilli(), string(data))
+		if err != nil {
+			slog.Warn("failed to save event", "id", event.ID, "err", err)
+		}
+	}()
+	return nil
+}
+
 func (s *Store) GetBindingsByRoom(platform, roomID string) []*RoomBinding {
 	key := platform + ":" + roomID
 	if val, ok := s.bindingCache.Load(key); ok {
 		return val.([]*RoomBinding)
 	}
-
 	bindings, err := s.loadBindingsFromDB(platform, roomID)
 	if err != nil {
 		slog.Error("db load failed", "err", err)
@@ -77,7 +106,6 @@ func (s *Store) loadBindingsFromDB(platform, roomID string) ([]*RoomBinding, err
 			ids = append(ids, id)
 		}
 	}
-
 	if len(ids) == 0 {
 		return []*RoomBinding{}, nil
 	}
@@ -96,7 +124,6 @@ func (s *Store) getBindingByID(id string) (*RoomBinding, error) {
 	if err := s.db.QueryRow("SELECT name FROM bindings WHERE id=?", id).Scan(&b.Name); err != nil {
 		return nil, err
 	}
-
 	rows, err := s.db.Query("SELECT platform, room_id, config_json FROM binding_rooms WHERE binding_id=?", id)
 	if err != nil {
 		return nil, err
@@ -160,10 +187,11 @@ func (s *Store) UpdateUserCache(platform, userID, name, avatar string) {
 }
 
 func (s *Store) cleanupLoop() {
-	ticker := time.NewTicker(12 * time.Hour)
+	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 	for range ticker.C {
-		expire := time.Now().Add(-48 * time.Hour).Unix() // PRD 5.2: TTL 清理
+		expire := time.Now().Add(-48 * time.Hour).Unix()
 		s.db.Exec("DELETE FROM message_mappings WHERE created_at < ?", expire)
+		s.db.Exec("DELETE FROM events WHERE timestamp < ?", expire*1000)
 	}
 }

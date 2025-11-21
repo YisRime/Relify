@@ -17,10 +17,12 @@ func NewPlatformRegistry() *PlatformRegistry {
 }
 
 func (r *PlatformRegistry) Register(p Platform) { r.platforms[p.Name()] = p }
+
 func (r *PlatformRegistry) Get(name string) (Platform, bool) {
 	p, ok := r.platforms[name]
 	return p, ok
 }
+
 func (r *PlatformRegistry) All() map[string]Platform { return r.platforms }
 
 type Core struct {

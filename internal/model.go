@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -15,14 +16,14 @@ const (
 	ActionDelete EventAction = "delete"
 )
 
-type MessageType string
-
 const (
-	MsgTypeText  MessageType = "text"
-	MsgTypeImage MessageType = "image"
-	MsgTypeAudio MessageType = "audio"
-	MsgTypeVideo MessageType = "video"
-	MsgTypeFile  MessageType = "file"
+	TypeText    = "text"
+	TypeImage   = "image"
+	TypeAudio   = "audio"
+	TypeVideo   = "video"
+	TypeFile    = "file"
+	TypeMention = "mention"
+	TypeReply   = "reply"
 )
 
 type RouteType string
@@ -32,20 +33,40 @@ const (
 	RouteTypeAggregate RouteType = "aggregate"
 )
 
+type Segment struct {
+	Type     string                 `json:"type"`
+	Data     map[string]interface{} `json:"data"`
+	Fallback string                 `json:"fallback,omitempty"`
+}
+
+func (s *Segment) Validate() error {
+	switch s.Type {
+	case TypeImage, TypeVideo, TypeAudio, TypeFile:
+		if GetString(s.Data, "url") == "" {
+			return fmt.Errorf("segment type %s requires 'url'", s.Type)
+		}
+	case TypeText:
+		if GetString(s.Data, "text") == "" {
+			return fmt.Errorf("text segment requires 'text' content")
+		}
+	case TypeMention:
+		if GetString(s.Data, "id") == "" && GetString(s.Data, "name") == "" {
+			return fmt.Errorf("mention segment requires 'id' or 'name'")
+		}
+	}
+	return nil
+}
+
 type Platform interface {
 	Name() string
 	GetBotUserID() string
 	GetRouteType() RouteType
-
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
-
 	SendMessage(ctx context.Context, msg *OutMessage) (string, error)
 	EditMessage(ctx context.Context, msg *OutMessage) error
 	DeleteMessage(ctx context.Context, roomID, msgID string) error
-
 	UploadFile(ctx context.Context, data []byte, filename string) (string, error)
-
 	CreateRoom(ctx context.Context, info *RoomInfo) (string, error)
 	GetRoomInfo(ctx context.Context, roomID string) (*RoomInfo, error)
 }
@@ -57,52 +78,38 @@ type InboundHandler interface {
 type Event struct {
 	ID        string      `json:"id"`
 	Action    EventAction `json:"action"`
-	Type      MessageType `json:"type"`
 	Platform  string      `json:"platform"`
 	Timestamp time.Time   `json:"timestamp"`
 	Message   *Message    `json:"message,omitempty"`
 }
 
 type Message struct {
-	ID           string `json:"id"`
-	RoomID       string `json:"room_id"`
-	SenderID     string `json:"sender_id"`
-	SenderName   string `json:"sender_name"`
-	SenderAvatar string `json:"sender_avatar"`
-
-	Content string   `json:"content"`
-	Files   []*File  `json:"files,omitempty"`
-	Embeds  []*Embed `json:"embeds,omitempty"`
-
-	ReplyToID string   `json:"reply_to_id,omitempty"`
-	Mentions  []string `json:"mentions,omitempty"`
-
-	Extra map[string]interface{} `json:"extra,omitempty"`
+	ID           string                 `json:"id"`
+	RoomID       string                 `json:"room_id"`
+	SenderID     string                 `json:"sender_id"`
+	SenderName   string                 `json:"sender_name"`
+	SenderAvatar string                 `json:"sender_avatar"`
+	Body         []Segment              `json:"body"`
+	ReplyToID    string                 `json:"reply_to_id,omitempty"`
+	Extra        map[string]interface{} `json:"extra,omitempty"`
 }
 
-type File struct {
-	Name         string `json:"name"`
-	URL          string `json:"url"`
-	MimeType     string `json:"mime_type"`
-	Size         int64  `json:"size"`
-	ThumbnailURL string `json:"thumbnail_url,omitempty"`
-}
-
-type Embed struct {
-	Title       string        `json:"title,omitempty"`
-	Description string        `json:"description,omitempty"`
-	URL         string        `json:"url,omitempty"`
-	Color       int           `json:"color,omitempty"`
-	Footer      string        `json:"footer,omitempty"`
-	Image       *File         `json:"image,omitempty"`
-	Thumbnail   *File         `json:"thumbnail,omitempty"`
-	Fields      []*EmbedField `json:"fields,omitempty"`
-}
-
-type EmbedField struct {
-	Name   string `json:"name"`
-	Value  string `json:"value"`
-	Inline bool   `json:"inline,omitempty"`
+func (m *Message) Validate() error {
+	if m.ID == "" {
+		return fmt.Errorf("message id is empty")
+	}
+	if m.RoomID == "" {
+		return fmt.Errorf("room id is empty")
+	}
+	if len(m.Body) == 0 {
+		return fmt.Errorf("message body is empty")
+	}
+	for i, seg := range m.Body {
+		if err := seg.Validate(); err != nil {
+			return fmt.Errorf("segment[%d] invalid: %w", i, err)
+		}
+	}
+	return nil
 }
 
 type OutMessage struct {
@@ -130,4 +137,27 @@ type BoundRoom struct {
 	Platform string
 	RoomID   string
 	Config   map[string]interface{}
+}
+
+func GetString(data map[string]interface{}, key string) string {
+	if v, ok := data[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func GetInt64(data map[string]interface{}, key string) int64 {
+	if v, ok := data[key]; ok {
+		switch n := v.(type) {
+		case int:
+			return int64(n)
+		case int64:
+			return n
+		case float64:
+			return int64(n)
+		}
+	}
+	return 0
 }
