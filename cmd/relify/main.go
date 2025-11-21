@@ -41,7 +41,15 @@ func main() {
 		if ma, err := adapter.NewMatrixAdapter(mc.Config, core.Router); err == nil {
 			core.RegisterPlatform(ma)
 		} else {
-			panic(err)
+			slog.Error("failed to init matrix", "err", err)
+		}
+	}
+
+	if qc, ok := cfg.Platforms["qq"]; ok && qc.Enabled {
+		if qa, err := adapter.NewQQAdapter(qc.Config, core.Router); err == nil {
+			core.RegisterPlatform(qa)
+		} else {
+			slog.Error("failed to init qq", "err", err)
 		}
 	}
 

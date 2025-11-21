@@ -92,7 +92,6 @@ func (m *MatrixAdapter) GetRouteType() internal.RouteType { return internal.Rout
 
 func (m *MatrixAdapter) Start(ctx context.Context) error {
 	go m.handleEvents()
-
 	m.server = &http.Server{Addr: m.as.Registration.URL, Handler: m.as.Router}
 	if u, err := url.Parse(m.cfg.Listen); err == nil {
 		m.server.Addr = u.Host
@@ -211,7 +210,6 @@ func (m *MatrixAdapter) SendMessage(ctx context.Context, msg *internal.OutMessag
 func (m *MatrixAdapter) EditMessage(ctx context.Context, msg *internal.OutMessage) error {
 	intent := m.getGhostIntent(msg.Message.SenderID, msg.Message.SenderName, msg.Message.SenderAvatar)
 	newContent := m.renderContent(msg.Message)
-
 	content := &event.MessageEventContent{
 		MsgType: event.MsgText, Body: "* " + newContent.Body, NewContent: newContent,
 		RelatesTo: &event.RelatesTo{Type: event.RelReplace, EventID: id.EventID(msg.TargetMessageID)},
@@ -292,7 +290,28 @@ func (m *MatrixAdapter) CreateRoom(ctx context.Context, info *internal.RoomInfo)
 }
 
 func (m *MatrixAdapter) GetRoomInfo(ctx context.Context, roomID string) (*internal.RoomInfo, error) {
-	return &internal.RoomInfo{ID: roomID, Name: roomID}, nil
+	rid := id.RoomID(roomID)
+	info := &internal.RoomInfo{ID: roomID, Name: roomID}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		var nameEvent event.RoomNameEventContent
+		if err := m.as.BotIntent().StateEvent(ctx, rid, event.StateRoomName, "", &nameEvent); err == nil && nameEvent.Name != "" {
+			info.Name = nameEvent.Name
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		var avatarEvent event.RoomAvatarEventContent
+		if err := m.as.BotIntent().StateEvent(ctx, rid, event.StateRoomAvatar, "", &avatarEvent); err == nil && avatarEvent.URL != "" {
+			mxc, _ := avatarEvent.URL.Parse()
+			info.AvatarURL = fmt.Sprintf("%s/_matrix/media/v3/download/%s/%s",
+				strings.TrimRight(m.cfg.HomeserverURL, "/"), mxc.Homeserver, mxc.FileID)
+		}
+	}()
+	wg.Wait()
+	return info, nil
 }
 
 func (m *MatrixAdapter) handleRedaction(evt *event.Event) {
