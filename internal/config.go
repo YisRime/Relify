@@ -39,8 +39,8 @@ func GenerateDefault() *Config {
 		LogLevel: "info",
 		Mode:     "hub",
 		Platforms: map[string]PlatformConfig{
-			"telegram": {Type: "telegram", Enabled: true},
-			"matrix":   {Type: "matrix", Enabled: false},
+			"qq":     {Type: "qq", Enabled: true},
+			"matrix": {Type: "matrix", Enabled: true},
 		},
 	}
 }
