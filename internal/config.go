@@ -10,8 +10,8 @@ import (
 type Config struct {
 	DataDir     string                    `yaml:"data_dir"`
 	LogLevel    string                    `yaml:"log_level"`
-	Mode        string                    `yaml:"mode"`         // "hub" or "peer"
-	HubPlatform string                    `yaml:"hub_platform"` // Only used if Mode == "hub"
+	Mode        string                    `yaml:"mode"`
+	HubPlatform string                    `yaml:"hub_platform"`
 	Platforms   map[string]PlatformConfig `yaml:"platforms"`
 }
 
@@ -34,10 +34,8 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func (c *Config) Validate() error {
-	if c.Mode == "hub" {
-		if c.HubPlatform == "" {
-			return fmt.Errorf("hub mode requires hub_platform to be set")
-		}
+	if c.Mode == "hub" && c.HubPlatform == "" {
+		return fmt.Errorf("hub mode requires hub_platform")
 	}
 	return nil
 }
@@ -53,9 +51,9 @@ func GenerateDefault() *Config {
 	return &Config{
 		DataDir:  "./data",
 		LogLevel: "info",
-		Mode:     "peer",
+		Mode:     "hub",
 		Platforms: map[string]PlatformConfig{
-			"discord_example": {Type: "discord", Enabled: false},
+			"telegram": {Type: "telegram", Enabled: true},
 		},
 	}
 }

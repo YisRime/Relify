@@ -5,7 +5,23 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 )
+
+type PlatformRegistry struct {
+	platforms map[string]Platform
+}
+
+func NewPlatformRegistry() *PlatformRegistry {
+	return &PlatformRegistry{platforms: make(map[string]Platform)}
+}
+
+func (r *PlatformRegistry) Register(p Platform) { r.platforms[p.Name()] = p }
+func (r *PlatformRegistry) Get(name string) (Platform, bool) {
+	p, ok := r.platforms[name]
+	return p, ok
+}
+func (r *PlatformRegistry) All() map[string]Platform { return r.platforms }
 
 type Core struct {
 	Config   *Config
@@ -26,19 +42,19 @@ func NewCore(cfg *Config) (*Core, error) {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
-	store, err := NewStore(cfg.GetDatabasePath())
+	storeInstance, err := NewStore(cfg.GetDatabasePath())
 	if err != nil {
 		return nil, fmt.Errorf("store init: %w", err)
 	}
 
-	registry := NewPlatformRegistry()
-	router := NewRouter(cfg, registry, store)
+	reg := NewPlatformRegistry()
+	router := NewRouter(cfg, reg, storeInstance)
 
 	return &Core{
 		Config:   cfg,
 		Router:   router,
-		Registry: registry,
-		Store:    store,
+		Registry: reg,
+		Store:    storeInstance,
 	}, nil
 }
 
@@ -49,11 +65,11 @@ func (c *Core) RegisterPlatform(p Platform) {
 		return
 	}
 	c.Registry.Register(p)
-	slog.Info("platform registered", "name", name)
+	slog.Info("platform registered", "name", name, "type", p.GetRouteType())
 }
 
 func (c *Core) Start(ctx context.Context) error {
-	active := 0
+	var active int
 	for name, p := range c.Registry.All() {
 		if err := p.Start(ctx); err != nil {
 			slog.Error("platform start failed", "name", name, "err", err)
@@ -72,8 +88,14 @@ func (c *Core) Start(ctx context.Context) error {
 }
 
 func (c *Core) Stop(ctx context.Context) error {
+	var wg sync.WaitGroup
 	for _, p := range c.Registry.All() {
-		p.Stop(ctx)
+		wg.Add(1)
+		go func(p Platform) {
+			defer wg.Done()
+			_ = p.Stop(ctx)
+		}(p)
 	}
+	wg.Wait()
 	return c.Store.Close()
 }

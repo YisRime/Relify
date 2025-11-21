@@ -46,9 +46,7 @@ func NewStore(dbPath string) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) Close() error {
-	return s.db.Close()
-}
+func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) GetBindingsByRoom(platform, roomID string) []*RoomBinding {
 	key := platform + ":" + roomID
@@ -165,7 +163,7 @@ func (s *Store) cleanupLoop() {
 	ticker := time.NewTicker(12 * time.Hour)
 	defer ticker.Stop()
 	for range ticker.C {
-		expire := time.Now().Add(-7 * 24 * time.Hour).Unix()
+		expire := time.Now().Add(-48 * time.Hour).Unix() // PRD 5.2: TTL 清理
 		s.db.Exec("DELETE FROM message_mappings WHERE created_at < ?", expire)
 	}
 }

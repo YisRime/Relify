@@ -5,12 +5,7 @@ import (
 	"time"
 )
 
-type RouteType string
-
-const (
-	RouteTypeMirror    RouteType = "mirror"
-	RouteTypeAggregate RouteType = "aggregate"
-)
+const AggregateRoomKey = "AGGREGATE"
 
 type EventAction string
 
@@ -30,6 +25,35 @@ const (
 	MsgTypeFile  MessageType = "file"
 )
 
+type RouteType string
+
+const (
+	RouteTypeMirror    RouteType = "mirror"
+	RouteTypeAggregate RouteType = "aggregate"
+)
+
+type Platform interface {
+	Name() string
+	GetBotUserID() string
+	GetRouteType() RouteType
+
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
+
+	SendMessage(ctx context.Context, msg *OutMessage) (string, error)
+	EditMessage(ctx context.Context, msg *OutMessage) error
+	DeleteMessage(ctx context.Context, roomID, msgID string) error
+
+	UploadFile(ctx context.Context, data []byte, filename string) (string, error)
+
+	CreateRoom(ctx context.Context, info *RoomInfo) (string, error)
+	GetRoomInfo(ctx context.Context, roomID string) (*RoomInfo, error)
+}
+
+type InboundHandler interface {
+	HandleEvent(ctx context.Context, event *Event) error
+}
+
 type Event struct {
 	ID        string      `json:"id"`
 	Action    EventAction `json:"action"`
@@ -40,17 +64,20 @@ type Event struct {
 }
 
 type Message struct {
-	ID           string                 `json:"id"`
-	RoomID       string                 `json:"room_id"`
-	SenderID     string                 `json:"sender_id"`
-	SenderName   string                 `json:"sender_name"`
-	SenderAvatar string                 `json:"sender_avatar"`
-	Content      string                 `json:"content"`
-	Files        []*File                `json:"files,omitempty"`
-	Embeds       []*Embed               `json:"embeds,omitempty"`
-	ReplyToID    string                 `json:"reply_to_id,omitempty"`
-	Mentions     []string               `json:"mentions,omitempty"`
-	Extra        map[string]interface{} `json:"extra,omitempty"`
+	ID           string `json:"id"`
+	RoomID       string `json:"room_id"`
+	SenderID     string `json:"sender_id"`
+	SenderName   string `json:"sender_name"`
+	SenderAvatar string `json:"sender_avatar"`
+
+	Content string   `json:"content"`
+	Files   []*File  `json:"files,omitempty"`
+	Embeds  []*Embed `json:"embeds,omitempty"`
+
+	ReplyToID string   `json:"reply_to_id,omitempty"`
+	Mentions  []string `json:"mentions,omitempty"`
+
+	Extra map[string]interface{} `json:"extra,omitempty"`
 }
 
 type File struct {
@@ -78,12 +105,19 @@ type EmbedField struct {
 	Inline bool   `json:"inline,omitempty"`
 }
 
-type OutboundMessage struct {
+type OutMessage struct {
 	TargetPlatform  string                 `json:"target_platform"`
 	TargetRoomID    string                 `json:"target_room_id"`
 	TargetConfig    map[string]interface{} `json:"target_config,omitempty"`
 	TargetMessageID string                 `json:"target_message_id,omitempty"`
 	Message         *Message               `json:"message"`
+}
+
+type RoomInfo struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	AvatarURL string `json:"avatar_url,omitempty"`
+	Topic     string `json:"topic,omitempty"`
 }
 
 type RoomBinding struct {
@@ -96,41 +130,4 @@ type BoundRoom struct {
 	Platform string
 	RoomID   string
 	Config   map[string]interface{}
-}
-
-type Platform interface {
-	Name() string
-	GetBotUserID() string
-	Start(ctx context.Context) error
-	Stop(ctx context.Context) error
-	SendMessage(ctx context.Context, msg *OutboundMessage) (string, error)
-	EditMessage(ctx context.Context, msg *OutboundMessage) error
-	DeleteMessage(ctx context.Context, roomID, msgID string) error
-	UploadFile(ctx context.Context, data []byte, filename string) (string, error)
-	CreateRoom(ctx context.Context, name string) (string, error)
-}
-
-type InboundHandler interface {
-	HandleEvent(ctx context.Context, event *Event) error
-}
-
-type PlatformRegistry struct {
-	platforms map[string]Platform
-}
-
-func NewPlatformRegistry() *PlatformRegistry {
-	return &PlatformRegistry{platforms: make(map[string]Platform)}
-}
-
-func (r *PlatformRegistry) Register(p Platform) {
-	r.platforms[p.Name()] = p
-}
-
-func (r *PlatformRegistry) Get(name string) (Platform, bool) {
-	p, exists := r.platforms[name]
-	return p, exists
-}
-
-func (r *PlatformRegistry) All() map[string]Platform {
-	return r.platforms
 }
