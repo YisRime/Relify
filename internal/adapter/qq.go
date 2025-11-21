@@ -116,15 +116,19 @@ func (q *QQAdapter) connectWS(ctx context.Context) {
 				break
 			}
 
+			slog.Debug("qq ws message received", "size", len(message))
+
 			var resp struct {
 				Echo string `json:"echo"`
 			}
 			if json.Unmarshal(message, &resp) == nil && resp.Echo != "" {
+				slog.Debug("qq api response received", "echo", resp.Echo)
 				if ch, ok := q.echoMap.Load(resp.Echo); ok {
 					ch.(chan []byte) <- message
 				}
 				continue
 			}
+			slog.Debug("qq processing event", "data", string(message))
 			go q.processEventBytes(context.Background(), message)
 		}
 
@@ -172,16 +176,24 @@ type onebotEvent struct {
 func (q *QQAdapter) processEventBytes(ctx context.Context, data []byte) {
 	var evt onebotEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
+		slog.Debug("qq failed to unmarshal event", "err", err)
 		return
 	}
+
+	slog.Debug("qq event parsed", "post_type", evt.PostType, "message_type", evt.MessageType, "group_id", evt.GroupID, "user_id", evt.UserID)
+
 	if evt.PostType != "message" || evt.MessageType != "group" {
+		slog.Debug("qq event ignored", "reason", "not group message")
 		return
 	}
 
 	bridgeGroupID, err := strconv.ParseInt(q.cfg.Group, 10, 64)
 	if err != nil || evt.GroupID != bridgeGroupID {
+		slog.Debug("qq event ignored", "reason", "group not matched", "expected", q.cfg.Group, "got", evt.GroupID)
 		return
 	}
+
+	slog.Debug("qq processing group message", "message_id", evt.MessageID, "sender", evt.Sender.Nickname)
 
 	senderName := evt.Sender.Card
 	if senderName == "" {
@@ -190,6 +202,8 @@ func (q *QQAdapter) processEventBytes(ctx context.Context, data []byte) {
 	if senderName == "" {
 		senderName = strconv.FormatInt(evt.UserID, 10)
 	}
+
+	slog.Debug("qq building relify event", "sender", senderName, "message_segments", len(evt.Message))
 
 	relifyEvt := &internal.Event{
 		ID:        strconv.Itoa(int(evt.MessageID)),
@@ -205,6 +219,7 @@ func (q *QQAdapter) processEventBytes(ctx context.Context, data []byte) {
 			Body:         q.parseOneBotMessage(evt.Message),
 		},
 	}
+	slog.Debug("qq calling handler", "event_id", relifyEvt.ID, "segments", len(relifyEvt.Message.Body))
 	q.handler.HandleEvent(ctx, relifyEvt)
 }
 
@@ -234,8 +249,11 @@ func (q *QQAdapter) parseOneBotMessage(raw json.RawMessage) []internal.Segment {
 }
 
 func (q *QQAdapter) SendMessage(ctx context.Context, msg *internal.OutMessage) (string, error) {
+	slog.Debug("qq sending message", "target_room", msg.TargetRoomID, "segments", len(msg.Message.Body))
+
 	groupID, err := strconv.ParseInt(msg.TargetRoomID, 10, 64)
 	if err != nil {
+		slog.Debug("qq send failed", "err", "invalid target room id", "room", msg.TargetRoomID)
 		return "", fmt.Errorf("invalid target room id: %s", msg.TargetRoomID)
 	}
 
@@ -245,6 +263,7 @@ func (q *QQAdapter) SendMessage(ctx context.Context, msg *internal.OutMessage) (
 	if msg.Message.ReplyToID != "" {
 		rid, _ := strconv.Atoi(msg.Message.ReplyToID)
 		obMsg = append(obMsg, map[string]interface{}{"type": "reply", "data": map[string]string{"id": strconv.Itoa(rid)}})
+		slog.Debug("qq adding reply", "reply_to", rid)
 	}
 
 	for _, seg := range msg.Message.Body {
@@ -261,8 +280,11 @@ func (q *QQAdapter) SendMessage(ctx context.Context, msg *internal.OutMessage) (
 	}
 	params["message"] = obMsg
 
+	slog.Debug("qq calling send_group_msg api", "segments", len(obMsg))
+
 	resp, err := q.callAPI("send_group_msg", params)
 	if err != nil {
+		slog.Debug("qq send api failed", "err", err)
 		return "", err
 	}
 
@@ -272,9 +294,12 @@ func (q *QQAdapter) SendMessage(ctx context.Context, msg *internal.OutMessage) (
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(resp, &resData); err != nil {
+		slog.Debug("qq send response parse failed", "err", err)
 		return "", err
 	}
-	return strconv.Itoa(int(resData.Data.MessageID)), nil
+	msgID := strconv.Itoa(int(resData.Data.MessageID))
+	slog.Debug("qq message sent", "message_id", msgID)
+	return msgID, nil
 }
 
 func (q *QQAdapter) callAPI(action string, params interface{}) ([]byte, error) {

@@ -42,6 +42,7 @@ func main() {
 	}
 
 	if mc, ok := cfg.Platforms["matrix"]; ok && mc.Enabled {
+		slog.Debug("initializing matrix adapter")
 		if ma, err := adapter.NewMatrixAdapter(mc.Config, core.Router); err == nil {
 			core.RegisterPlatform(ma)
 		} else {
@@ -50,6 +51,7 @@ func main() {
 	}
 
 	if qc, ok := cfg.Platforms["qq"]; ok && qc.Enabled {
+		slog.Debug("initializing qq adapter")
 		if qa, err := adapter.NewQQAdapter(qc.Config, core.Router); err == nil {
 			core.RegisterPlatform(qa)
 		} else {
@@ -57,6 +59,7 @@ func main() {
 		}
 	}
 
+	slog.Debug("starting core", "platforms", len(core.Registry.All()))
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := core.Start(ctx); err != nil {
 		fmt.Println(err)

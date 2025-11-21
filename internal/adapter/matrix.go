@@ -66,6 +66,9 @@ func NewMatrixAdapter(node yaml.Node, handler internal.InboundHandler) (*MatrixA
 	cfg.HomeserverURL = strings.TrimRight(cfg.HomeserverURL, "/")
 
 	as := appservice.Create()
+	if err := as.SetHomeserverURL(cfg.HomeserverURL); err != nil {
+		return nil, err
+	}
 	as.Registration = &appservice.Registration{
 		ID:              "relify-bridge",
 		URL:             cfg.Listen,
@@ -119,7 +122,9 @@ func (m *MatrixAdapter) Stop(ctx context.Context) error {
 }
 
 func (m *MatrixAdapter) handleEvents() {
+	slog.Debug("matrix event handler started")
 	for evt := range m.as.Events {
+		slog.Debug("matrix event received", "type", evt.Type.Type, "room", evt.RoomID, "sender", evt.Sender)
 		switch evt.Type {
 		case event.EventMessage:
 			m.handleMessage(evt)
@@ -127,12 +132,18 @@ func (m *MatrixAdapter) handleEvents() {
 			m.handleRedaction(evt)
 		case event.StateMember:
 			m.handleMembership(evt)
+		default:
+			slog.Debug("matrix event ignored", "type", evt.Type.Type)
 		}
 	}
+	slog.Debug("matrix event handler stopped")
 }
 
 func (m *MatrixAdapter) handleMessage(evt *event.Event) {
+	slog.Debug("matrix handling message", "event_id", evt.ID, "sender", evt.Sender, "room", evt.RoomID)
+
 	if m.isMe(evt.Sender) {
+		slog.Debug("matrix message ignored", "reason", "sent by bot")
 		return
 	}
 
@@ -140,6 +151,8 @@ func (m *MatrixAdapter) handleMessage(evt *event.Event) {
 	defer cancel()
 
 	content := evt.Content.AsMessage()
+	slog.Debug("matrix message content", "msgtype", content.MsgType, "body", content.Body)
+
 	relifyEvt := &internal.Event{
 		Platform: m.Name(), Timestamp: time.UnixMilli(evt.Timestamp),
 		Message: &internal.Message{RoomID: evt.RoomID.String(), SenderID: evt.Sender.String(), SenderName: evt.Sender.String(), Body: []internal.Segment{}},
@@ -193,17 +206,23 @@ func (m *MatrixAdapter) handleMessage(evt *event.Event) {
 }
 
 func (m *MatrixAdapter) SendMessage(ctx context.Context, msg *internal.OutMessage) (string, error) {
+	slog.Debug("matrix sending message", "room", msg.TargetRoomID, "sender", msg.Message.SenderName)
+
 	intent := m.getGhostIntent(msg.Message.SenderID, msg.Message.SenderName, msg.Message.SenderAvatar)
 	content := m.renderContent(msg.Message)
 
 	if msg.Message.ReplyToID != "" {
+		slog.Debug("matrix adding reply", "reply_to", msg.Message.ReplyToID)
 		content.RelatesTo = &event.RelatesTo{InReplyTo: &event.InReplyTo{EventID: id.EventID(msg.Message.ReplyToID)}}
 	}
 
+	slog.Debug("matrix calling send message event")
 	resp, err := intent.SendMessageEvent(ctx, id.RoomID(msg.TargetRoomID), event.EventMessage, content)
 	if err != nil {
+		slog.Debug("matrix send failed", "err", err)
 		return "", err
 	}
+	slog.Debug("matrix message sent", "event_id", resp.EventID)
 	return resp.EventID.String(), nil
 }
 
@@ -265,6 +284,8 @@ func (m *MatrixAdapter) UploadFile(ctx context.Context, data []byte, filename st
 }
 
 func (m *MatrixAdapter) CreateRoom(ctx context.Context, info *internal.RoomInfo) (string, error) {
+	slog.Debug("matrix creating room", "name", info.Name, "topic", info.Topic)
+
 	intent := m.as.BotIntent()
 	req := &mautrix.ReqCreateRoom{
 		Name: info.Name, Topic: info.Topic, Preset: "private_chat", Visibility: "private",
@@ -272,18 +293,24 @@ func (m *MatrixAdapter) CreateRoom(ctx context.Context, info *internal.RoomInfo)
 	}
 	if alias := m.sanitizeLocalpart(info.Name); alias != "" {
 		req.RoomAliasName = alias
+		slog.Debug("matrix using room alias", "alias", alias)
 	}
 
 	resp, err := intent.CreateRoom(ctx, req)
 	if err != nil && strings.Contains(err.Error(), "taken") {
+		slog.Debug("matrix alias taken, retrying without alias")
 		req.RoomAliasName = ""
 		resp, err = intent.CreateRoom(ctx, req)
 	}
 	if err != nil {
+		slog.Debug("matrix room creation failed", "err", err)
 		return "", err
 	}
 
+	slog.Debug("matrix room created", "room_id", resp.RoomID)
+
 	if m.cfg.AutoInviteUser != "" {
+		slog.Debug("matrix auto-inviting user", "user", m.cfg.AutoInviteUser)
 		intent.InviteUser(ctx, resp.RoomID, &mautrix.ReqInviteUser{UserID: id.UserID(m.cfg.AutoInviteUser)})
 	}
 	return resp.RoomID.String(), nil

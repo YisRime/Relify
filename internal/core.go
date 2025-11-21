@@ -3,9 +3,12 @@ package internal
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
+	"time"
 )
 
 type PlatformRegistry struct {
@@ -37,7 +40,19 @@ func NewCore(cfg *Config) (*Core, error) {
 	if cfg.LogLevel == "debug" {
 		lvl = slog.LevelDebug
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})))
+
+	// 设置日志输出到文件和 stdout
+	logFile, err := setupLogFile(cfg.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup log file: %w", err)
+	}
+
+	// 创建多输出 writer（同时输出到 stdout 和文件）
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	handler := slog.NewJSONHandler(multiWriter, &slog.HandlerOptions{Level: lvl})
+	slog.SetDefault(slog.New(handler))
+
+	slog.Info("logging initialized", "level", cfg.LogLevel, "log_file", logFile.Name())
 
 	store, err := NewStore(cfg.GetDatabasePath())
 	if err != nil {
@@ -51,6 +66,24 @@ func NewCore(cfg *Config) (*Core, error) {
 		Registry: reg,
 		Store:    store,
 	}, nil
+}
+
+func setupLogFile(dataDir string) (*os.File, error) {
+	logDir := filepath.Join(dataDir, "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, err
+	}
+
+	// 使用日期时间作为日志文件名
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	logPath := filepath.Join(logDir, fmt.Sprintf("relify_%s.log", timestamp))
+
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	return logFile, nil
 }
 
 func (c *Core) RegisterPlatform(p Platform) {
