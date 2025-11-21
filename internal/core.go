@@ -3,6 +3,8 @@ package internal
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 )
 
 type Core struct {
@@ -10,46 +12,51 @@ type Core struct {
 	Router   *Router
 	Registry *PlatformRegistry
 	Store    *Store
-	Logger   *Logger
 }
 
 func NewCore(cfg *Config) (*Core, error) {
-	log := GetGlobal()
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		return nil, err
+	}
 
-	store, err := NewStore(cfg.GetDatabasePath(), log)
+	logLevel := slog.LevelInfo
+	if cfg.LogLevel == "debug" {
+		logLevel = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(logger)
+
+	store, err := NewStore(cfg.GetDatabasePath())
 	if err != nil {
 		return nil, fmt.Errorf("store init: %w", err)
 	}
 
 	registry := NewPlatformRegistry()
-	router := NewRouter(cfg, registry, store, log)
+	router := NewRouter(cfg, registry, store)
 
 	return &Core{
 		Config:   cfg,
 		Router:   router,
 		Registry: registry,
 		Store:    store,
-		Logger:   log,
 	}, nil
 }
 
 func (c *Core) RegisterPlatform(p Platform) {
 	name := p.Name()
 	pCfg, ok := c.Config.Platforms[name]
-
 	if !ok || !pCfg.Enabled {
 		return
 	}
-
 	c.Registry.Register(p)
-	c.Logger.Log(InfoLevel, "core", "platform registered", map[string]interface{}{"plat": name})
+	slog.Info("platform registered", "name", name)
 }
 
 func (c *Core) Start(ctx context.Context) error {
 	active := 0
 	for name, p := range c.Registry.All() {
 		if err := p.Start(ctx); err != nil {
-			c.Logger.Log(ErrorLevel, "core", "start failed", map[string]interface{}{"plat": name, "err": err.Error()})
+			slog.Error("platform start failed", "name", name, "err", err)
 			if c.Config.Mode == "hub" && c.Config.HubPlatform == name {
 				return fmt.Errorf("hub platform died: %w", err)
 			}
@@ -57,16 +64,16 @@ func (c *Core) Start(ctx context.Context) error {
 			active++
 		}
 	}
-
 	if active == 0 {
 		return fmt.Errorf("no platforms active")
 	}
+	slog.Info("core running", "mode", c.Config.Mode)
 	return nil
 }
 
 func (c *Core) Stop(ctx context.Context) error {
 	for _, p := range c.Registry.All() {
-		_ = p.Stop(ctx)
+		p.Stop(ctx)
 	}
 	return c.Store.Close()
 }

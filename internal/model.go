@@ -40,20 +40,17 @@ type Event struct {
 }
 
 type Message struct {
-	ID           string `json:"id"`
-	RoomID       string `json:"room_id"`
-	SenderID     string `json:"sender_id"`
-	SenderName   string `json:"sender_name"`
-	SenderAvatar string `json:"sender_avatar"`
-
-	Content string   `json:"content"`
-	Files   []*File  `json:"files,omitempty"`
-	Embeds  []*Embed `json:"embeds,omitempty"`
-
-	ReplyToID string   `json:"reply_to_id,omitempty"`
-	Mentions  []string `json:"mentions,omitempty"`
-
-	Extra map[string]interface{} `json:"extra,omitempty"`
+	ID           string                 `json:"id"`
+	RoomID       string                 `json:"room_id"`
+	SenderID     string                 `json:"sender_id"`
+	SenderName   string                 `json:"sender_name"`
+	SenderAvatar string                 `json:"sender_avatar"`
+	Content      string                 `json:"content"`
+	Files        []*File                `json:"files,omitempty"`
+	Embeds       []*Embed               `json:"embeds,omitempty"`
+	ReplyToID    string                 `json:"reply_to_id,omitempty"`
+	Mentions     []string               `json:"mentions,omitempty"`
+	Extra        map[string]interface{} `json:"extra,omitempty"`
 }
 
 type File struct {
@@ -82,11 +79,11 @@ type EmbedField struct {
 }
 
 type OutboundMessage struct {
-	TargetPlatform  string `json:"target_platform"`
-	TargetRoomID    string `json:"target_room_id"`
-	TargetConfig    map[string]interface{}
-	TargetMessageID string   `json:"target_message_id,omitempty"`
-	Message         *Message `json:"message"`
+	TargetPlatform  string                 `json:"target_platform"`
+	TargetRoomID    string                 `json:"target_room_id"`
+	TargetConfig    map[string]interface{} `json:"target_config,omitempty"`
+	TargetMessageID string                 `json:"target_message_id,omitempty"`
+	Message         *Message               `json:"message"`
 }
 
 type RoomBinding struct {
@@ -106,12 +103,10 @@ type Platform interface {
 	GetBotUserID() string
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
-
 	SendMessage(ctx context.Context, msg *OutboundMessage) (string, error)
 	EditMessage(ctx context.Context, msg *OutboundMessage) error
 	DeleteMessage(ctx context.Context, roomID, msgID string) error
 	UploadFile(ctx context.Context, data []byte, filename string) (string, error)
-
 	CreateRoom(ctx context.Context, name string) (string, error)
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,60 +14,39 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "Path to config")
+	cfgPath := flag.String("config", "config.yaml", "Config file path")
 	flag.Parse()
 
-	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
-		internal.SaveConfig(*configPath, internal.GenerateDefault())
-		fmt.Printf("Config generated at %s. Edit and restart.\n", *configPath)
-		os.Exit(0)
+	if _, err := os.Stat(*cfgPath); os.IsNotExist(err) {
+		internal.SaveConfig(*cfgPath, internal.GenerateDefault())
+		fmt.Println("Config generated. Please edit and restart.")
+		return
 	}
 
-	cfg, err := internal.LoadConfig(*configPath)
+	cfg, err := internal.LoadConfig(*cfgPath)
 	if err != nil {
-		fatal("Config load failed: %v", err)
+		panic(err)
 	}
-	if err := cfg.Validate(); err != nil {
-		fatal("Config invalid: %v", err)
-	}
-
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
-		fatal("Data dir error: %v", err)
-	}
-
-	logger, err := internal.NewLoggerFromConfig(cfg.LogLevel, cfg.GetLogsDir())
-	if err != nil {
-		fatal("Logger error: %v", err)
-	}
-	internal.SetGlobal(logger)
-	defer logger.Close()
 
 	core, err := internal.NewCore(cfg)
 	if err != nil {
-		logger.Log(internal.ErrorLevel, "main", "Init failed", map[string]interface{}{"err": err.Error()})
-		os.Exit(1)
+		panic(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	if err := core.Start(ctx); err != nil {
-		logger.Log(internal.ErrorLevel, "main", "Start failed", map[string]interface{}{"err": err.Error()})
+		fmt.Printf("Start error: %v\n", err)
 		os.Exit(1)
 	}
 
-	logger.Log(internal.InfoLevel, "main", "Running", map[string]interface{}{"pid": os.Getpid()})
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	<-sigChan
+	slog.Info("shutting down...")
+	cancel()
 
-	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer sCancel()
-	core.Stop(shutdownCtx)
-}
-
-func fatal(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "[FATAL] "+format+"\n", args...)
-	os.Exit(1)
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	core.Stop(stopCtx)
 }

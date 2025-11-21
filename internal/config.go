@@ -10,9 +10,8 @@ import (
 type Config struct {
 	DataDir     string                    `yaml:"data_dir"`
 	LogLevel    string                    `yaml:"log_level"`
-	Mode        string                    `yaml:"mode"`
-	HubPlatform string                    `yaml:"hub_platform"`
-	HubRoomID   string                    `yaml:"hub_room_id"`
+	Mode        string                    `yaml:"mode"`         // "hub" or "peer"
+	HubPlatform string                    `yaml:"hub_platform"` // Only used if Mode == "hub"
 	Platforms   map[string]PlatformConfig `yaml:"platforms"`
 }
 
@@ -36,15 +35,14 @@ func LoadConfig(path string) (*Config, error) {
 
 func (c *Config) Validate() error {
 	if c.Mode == "hub" {
-		if c.HubPlatform == "" || c.HubRoomID == "" {
-			return fmt.Errorf("hub mode requires hub_platform and hub_room_id")
+		if c.HubPlatform == "" {
+			return fmt.Errorf("hub mode requires hub_platform to be set")
 		}
 	}
 	return nil
 }
 
 func (c *Config) GetDatabasePath() string { return c.DataDir + "/relify.db" }
-func (c *Config) GetLogsDir() string      { return c.DataDir + "/logs" }
 
 func SaveConfig(path string, cfg *Config) error {
 	data, _ := yaml.Marshal(cfg)
