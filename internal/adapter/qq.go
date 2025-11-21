@@ -24,25 +24,24 @@ import (
 )
 
 type QQConfig struct {
-	Protocol     string  `yaml:"protocol"`
-	APIURL       string  `yaml:"api_url"`
-	ListenAddr   string  `yaml:"listen_addr"`
-	AccessToken  string  `yaml:"access_token"`
-	Secret       string  `yaml:"secret"`
-	BridgeGroups []int64 `yaml:"bridge_groups"`
+	Protocol    string `yaml:"protocol"`
+	APIURL      string `yaml:"api_url"`
+	ListenAddr  string `yaml:"listen_addr"`
+	AccessToken string `yaml:"access_token"`
+	Secret      string `yaml:"secret"`
+	BridgeGroup string `yaml:"bridge_group"`
 }
 
 type QQAdapter struct {
-	cfg         QQConfig
-	handler     internal.InboundHandler
-	httpServer  *http.Server
-	wsConn      *websocket.Conn
-	wsMu        sync.Mutex
-	httpClient  *http.Client
-	selfID      string
-	selfIDMu    sync.RWMutex
-	echoMap     sync.Map
-	groupFilter map[int64]bool
+	cfg        QQConfig
+	handler    internal.InboundHandler
+	httpServer *http.Server
+	wsConn     *websocket.Conn
+	wsMu       sync.Mutex
+	httpClient *http.Client
+	selfID     string
+	selfIDMu   sync.RWMutex
+	echoMap    sync.Map
 }
 
 func NewQQAdapter(node yaml.Node, handler internal.InboundHandler) (*QQAdapter, error) {
@@ -54,16 +53,10 @@ func NewQQAdapter(node yaml.Node, handler internal.InboundHandler) (*QQAdapter, 
 		cfg.Protocol = "http"
 	}
 
-	filter := make(map[int64]bool)
-	for _, gid := range cfg.BridgeGroups {
-		filter[gid] = true
-	}
-
 	return &QQAdapter{
-		cfg:         cfg,
-		handler:     handler,
-		httpClient:  &http.Client{Timeout: 10 * time.Second},
-		groupFilter: filter,
+		cfg:        cfg,
+		handler:    handler,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}, nil
 }
 
@@ -281,22 +274,16 @@ func (q *QQAdapter) processEventBytes(ctx context.Context, data []byte) {
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return
 	}
-	if evt.PostType != "message" {
+	if evt.PostType != "message" || evt.MessageType != "group" {
 		return
 	}
 
-	if evt.MessageType == "group" && len(q.groupFilter) > 0 && !q.groupFilter[evt.GroupID] {
+	bridgeGroupID, err := strconv.ParseInt(q.cfg.BridgeGroup, 10, 64)
+	if err != nil || evt.GroupID != bridgeGroupID {
 		return
 	}
 
-	var roomID string
-	if evt.MessageType == "group" {
-		roomID = fmt.Sprintf("g:%d", evt.GroupID)
-	} else if evt.MessageType == "private" {
-		roomID = fmt.Sprintf("p:%d", evt.UserID)
-	} else {
-		return
-	}
+	roomID := internal.AggregateRoomKey
 
 	senderName := evt.Sender.Card
 	if senderName == "" {
@@ -349,20 +336,17 @@ func (q *QQAdapter) parseOneBotMessage(raw json.RawMessage) []internal.Segment {
 }
 
 func (q *QQAdapter) SendMessage(ctx context.Context, msg *internal.OutMessage) (string, error) {
-	parts := strings.SplitN(msg.TargetRoomID, ":", 2)
-	if len(parts) != 2 {
-		return "", fmt.Errorf("invalid room id")
+	if q.cfg.BridgeGroup == "" {
+		return "", fmt.Errorf("bridge_group not configured")
 	}
-	typeStr, idStr := parts[0], parts[1]
-	targetID, _ := strconv.ParseInt(idStr, 10, 64)
 
-	action := "send_group_msg"
-	params := map[string]interface{}{"group_id": targetID}
-	if typeStr == "p" {
-		action = "send_private_msg"
-		delete(params, "group_id")
-		params["user_id"] = targetID
+	// Convert BridgeGroup string to int64 for API call
+	bridgeGroupID, err := strconv.ParseInt(q.cfg.BridgeGroup, 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("invalid bridge_group: %w", err)
 	}
+
+	params := map[string]interface{}{"group_id": bridgeGroupID}
 
 	var obMsg []map[string]interface{}
 	if msg.Message.ReplyToID != "" {
@@ -383,7 +367,8 @@ func (q *QQAdapter) SendMessage(ctx context.Context, msg *internal.OutMessage) (
 		}
 	}
 	params["message"] = obMsg
-	resp, err := q.callAPI(action, params)
+
+	resp, err := q.callAPI("send_group_msg", params)
 	if err != nil {
 		return "", err
 	}
@@ -458,41 +443,31 @@ func (q *QQAdapter) CreateRoom(ctx context.Context, info *internal.RoomInfo) (st
 }
 
 func (q *QQAdapter) GetRoomInfo(ctx context.Context, roomID string) (*internal.RoomInfo, error) {
-	if strings.HasPrefix(roomID, "p:") {
-		uidStr := roomID[2:]
-		uid, _ := strconv.ParseInt(uidStr, 10, 64)
-		info := &internal.RoomInfo{ID: roomID, Name: uidStr}
-		info.AvatarURL = fmt.Sprintf("https://q1.qlogo.cn/g?b=qq&nk=%d&s=640", uid)
-		resp, err := q.callAPI("get_stranger_info", map[string]interface{}{"user_id": uid})
-		if err == nil {
-			var d struct {
-				Data struct {
-					Nickname string `json:"nickname"`
-				} `json:"data"`
-			}
-			if json.Unmarshal(resp, &d) == nil && d.Data.Nickname != "" {
-				info.Name = d.Data.Nickname
-			}
-		}
-		return info, nil
+	if q.cfg.BridgeGroup == "" {
+		return &internal.RoomInfo{ID: roomID, Name: "QQ Bridge"}, nil
 	}
-	if strings.HasPrefix(roomID, "g:") {
-		gidStr := roomID[2:]
-		gid, _ := strconv.ParseInt(gidStr, 10, 64)
-		info := &internal.RoomInfo{ID: roomID, Name: gidStr}
-		info.AvatarURL = fmt.Sprintf("https://p.qlogo.cn/gh/%d/%d/100", gid, gid)
-		resp, err := q.callAPI("get_group_info", map[string]interface{}{"group_id": gid})
-		if err == nil {
-			var d struct {
-				Data struct {
-					GroupName string `json:"group_name"`
-				} `json:"data"`
-			}
-			if json.Unmarshal(resp, &d) == nil && d.Data.GroupName != "" {
-				info.Name = d.Data.GroupName
-			}
-		}
-		return info, nil
+
+	gid, err := strconv.ParseInt(q.cfg.BridgeGroup, 10, 64)
+	if err != nil {
+		return &internal.RoomInfo{ID: roomID, Name: "QQ Bridge"}, nil
 	}
-	return &internal.RoomInfo{ID: roomID, Name: roomID}, nil
+
+	info := &internal.RoomInfo{
+		ID:        roomID,
+		Name:      q.cfg.BridgeGroup,
+		AvatarURL: fmt.Sprintf("https://p.qlogo.cn/gh/%d/%d/100", gid, gid),
+	}
+
+	resp, err := q.callAPI("get_group_info", map[string]interface{}{"group_id": gid})
+	if err == nil {
+		var d struct {
+			Data struct {
+				GroupName string `json:"group_name"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(resp, &d) == nil && d.Data.GroupName != "" {
+			info.Name = d.Data.GroupName
+		}
+	}
+	return info, nil
 }

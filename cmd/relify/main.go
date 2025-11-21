@@ -19,8 +19,12 @@ func main() {
 	flag.Parse()
 
 	if _, err := os.Stat(*cfgPath); os.IsNotExist(err) {
-		internal.SaveConfig(*cfgPath, internal.GenerateDefault())
-		fmt.Println("Config generated.")
+		if err := internal.SaveConfig(*cfgPath, internal.GenerateDefault()); err != nil {
+			fmt.Printf("Failed to generate config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Configuration file generated: %s\n", *cfgPath)
+		fmt.Println("After configuration, run the program again to start.")
 		return
 	}
 

@@ -16,6 +16,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	cfg.EnsureConfigsValid()
 	return cfg, nil
 }
 
@@ -26,21 +27,59 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+func (c *Config) EnsureConfigsValid() {
+	defaults := GenerateDefault()
+	for name, platform := range c.Platforms {
+		if platform.Config.Kind == 0 || platform.Config.Tag == "!!null" {
+			if defaultPlatform, ok := defaults.Platforms[name]; ok {
+				platform.Config = defaultPlatform.Config
+				c.Platforms[name] = platform
+				fmt.Printf("Warning: Platform %s config is null, using defaults\n", name)
+			}
+		}
+	}
+}
+
 func (c *Config) GetDatabasePath() string { return c.DataDir + "/relify.db" }
 
 func SaveConfig(path string, cfg *Config) error {
-	data, _ := yaml.Marshal(cfg)
+	cfg.EnsureConfigsValid()
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
 	return os.WriteFile(path, data, 0644)
 }
 
 func GenerateDefault() *Config {
+	var qqConfig, matrixConfig yaml.Node
+	qqConfig.Encode(map[string]interface{}{
+		"protocol":     "ws",
+		"api_url":      "ws://localhost:3001",
+		"listen_addr":  "localhost:8080",
+		"access_token": "",
+		"secret":       "",
+		"bridge_group": "",
+	})
+	matrixConfig.Encode(map[string]interface{}{
+		"homeserver_url":   "http://localhost:8448",
+		"domain":           "localhost",
+		"as_token":         "as_token",
+		"hs_token":         "hs_token",
+		"bot_localpart":    "relify_bot",
+		"listen":           "http://localhost:6168",
+		"user_namespace":   "relify_",
+		"auto_invite_user": "",
+	})
+
 	return &Config{
-		DataDir:  "./data",
-		LogLevel: "info",
-		Mode:     "hub",
+		DataDir:     "./data",
+		LogLevel:    "info",
+		Mode:        "hub",
+		HubPlatform: "matrix",
 		Platforms: map[string]PlatformConfig{
-			"qq":     {Type: "qq", Enabled: true},
-			"matrix": {Type: "matrix", Enabled: true},
+			"qq":     {Type: "qq", Enabled: true, Config: qqConfig},
+			"matrix": {Type: "matrix", Enabled: true, Config: matrixConfig},
 		},
 	}
 }
