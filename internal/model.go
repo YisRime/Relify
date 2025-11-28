@@ -5,153 +5,247 @@ import (
 	"time"
 )
 
-// Kind 表示事件的类型
-type Kind string
+// EventType 定义了事件的高层业务分类。
+type EventType string
 
 const (
-	Msg  Kind = "msg"  // 消息事件
-	Note Kind = "note" // 通知事件（如撤回、群组变更等）
+	// TypeMessage 代表普通消息事件（包含文本、图片、文件、引用回复等）。
+	TypeMessage EventType = "message"
+	// TypeNotice 代表系统提示或通知（如“某人加入了群聊”）。
+	TypeNotice EventType = "notice"
+	// TypeRevoke 代表撤回操作。配合 Event.RefID 指向被撤回的消息。
+	TypeRevoke EventType = "revoke"
+	// TypeEdit 代表编辑操作。配合 Event.RefID 指向被编辑的消息。
+	TypeEdit EventType = "edit"
+	// TypeReaction 代表互动/表态操作（如点赞）。配合 Event.RefID 指向被表态的消息。
+	TypeReaction EventType = "reaction"
 )
 
-// 事件子类型常量
+// SegmentType 定义了消息内容片段的具体类型。
+type SegmentType string
+
 const (
-	Revoke = "revoke" // 撤回消息
-	Edit   = "edit"   // 编辑消息
+	// SegText 纯文本内容。
+	SegText SegmentType = "text"
+	// SegImage 图片内容。
+	SegImage SegmentType = "image"
+	// SegAudio 语音/音频内容。
+	SegAudio SegmentType = "audio"
+	// SegVideo 视频内容。
+	SegVideo SegmentType = "video"
+	// SegFile 通用文件内容。
+	SegFile SegmentType = "file"
+	// SegMention 提及某人 (@用户)。
+	SegMention SegmentType = "mention"
+	// SegReaction 表情表态 (Emoji)。
+	SegReaction SegmentType = "reaction"
 )
 
-// Props 是通用的属性映射类型，用于存储任意键值对
-type Props map[string]any
+// SenderType 定义了发送者的实体类型。
+type SenderType string
 
-// Event 表示跨平台的统一事件结构
-// 用于在不同聊天平台之间传递消息和通知
+const (
+	// SenderUser 代表普通人类用户。
+	SenderUser SenderType = "user"
+	// SenderBot 代表机器人或自动化程序。
+	SenderBot SenderType = "bot"
+	// SenderSystem 代表系统本身（如系统通知消息）。
+	SenderSystem SenderType = "system"
+)
+
+// Properties 是一个通用的键值对映射，用于存储非结构化的配置、权限标志或原始数据。
+type Properties map[string]any
+
+// Sender 扁平化地定义了事件触发者（发送者）的信息。
+type Sender struct {
+	// ID 是用户在源平台的唯一标识符。
+	ID string `json:"id"`
+	// Name 是用户的显示名称或昵称。
+	Name string `json:"name"`
+	// Type 标识发送者的类型（用户、机器人、系统）。
+	Type SenderType `json:"type"`
+	// Avatar 是用户的头像 URL。
+	Avatar string `json:"avatar,omitempty"`
+	// Role 存储用户的角色标签、权限集或其他身份元数据。
+	Role Properties `json:"role,omitempty"`
+}
+
+// FileInfo 定义了标准化的文件元数据，用于图片、视频、语音或普通文件。
+type FileInfo struct {
+	// ID 是文件在源平台的唯一标识（如有）。
+	ID string `json:"id,omitempty"`
+	// URL 是文件的下载或访问链接。
+	URL string `json:"url,omitempty"`
+	// Name 是原始文件名。
+	Name string `json:"name,omitempty"`
+	// MimeType 是文件的 MIME 类型 (如 image/jpeg)。
+	MimeType string `json:"mime,omitempty"`
+	// Size 是文件大小（字节）。
+	Size int64 `json:"size,omitempty"`
+	// Duration 是音视频的时长（秒）。
+	Duration int `json:"duration,omitempty"`
+	// Width 是图片或视频的宽度（像素）。
+	Width int `json:"width,omitempty"`
+	// Height 是图片或视频的高度（像素）。
+	Height int `json:"height,omitempty"`
+}
+
+// Segment 代表消息内容的一个片段。
+// 这是一个多态结构，通过 Type 字段决定 ID 和 Text 字段的具体含义，极度减少了嵌套层级。
+type Segment struct {
+	// Type 标识片段的类型。
+	Type SegmentType `json:"type"`
+
+	// ID 是通用标识符字段，含义取决于 Type：
+	// - SegMention: 被 @ 的用户 ID。
+	// - SegImage/File/Video: 文件的 ID (可选)。
+	// - SegReaction: 通常为空，但在某些平台可能代表特定 Reaction 实例 ID。
+	ID string `json:"id,omitempty"`
+
+	// Text 是通用内容字段，含义取决于 Type：
+	// - SegText: 消息文本内容。
+	// - SegMention: 被 @ 用户的显示名称。
+	// - SegReaction: 表情符号 (如 "👍")。
+	Text string `json:"text,omitempty"`
+
+	// File 仅在媒体类型 (Image/Audio/Video/File) 时使用，存储文件元数据。
+	File *FileInfo `json:"file,omitempty"`
+
+	// Extra 存储特殊标志或额外数据。
+	// 例如：Type 为 SegReaction 时，Extra["remove"] = true 表示这是一个“取消表态”的操作。
+	Extra Properties `json:"extra,omitempty"`
+}
+
+// Event 代表一个在系统内部流转的标准化事件。
+// 所有的业务逻辑（消息、撤回、互动）统一使用此结构，通过 Type 和 RefID 区分意图。
 type Event struct {
-	ID     string    `json:"id"`               // 事件 ID（平台内唯一标识）
-	Kind   Kind      `json:"kind"`             // 事件类型（消息或通知）
-	Time   time.Time `json:"time"`             // 事件时间戳
-	Plat   string    `json:"plat"`             // 来源平台名称
-	Room   string    `json:"room"`             // 房间/群组 ID
-	User   string    `json:"user,omitempty"`   // 发送者用户 ID
-	Name   string    `json:"name,omitempty"`   // 发送者昵称
-	Avatar string    `json:"avatar,omitempty"` // 发送者头像 URL
-	Segs   []Seg     `json:"segs,omitempty"`   // 消息内容段列表
-	Ref    string    `json:"ref,omitempty"`    // 引用的消息 ID（用于回复、编辑、撤回等）
-	Extra  Props     `json:"extra,omitempty"`  // 额外的平台特定属性
+	// ID 是事件在源平台上的唯一标识符。
+	ID string `json:"id"`
+	// Type 标识事件的类型（如消息、撤回、互动）。
+	Type EventType `json:"type"`
+	// Time 是事件发生的时间。
+	Time time.Time `json:"time"`
+	// Platform 是产生该事件的源平台名称。
+	Platform string `json:"platform"`
+	// RoomID 是事件发生的房间或群组ID。
+	RoomID string `json:"room_id"`
+
+	// Sender 包含触发事件的用户信息。
+	Sender *Sender `json:"sender,omitempty"`
+
+	// Segments 包含事件的具体内容负载。
+	// - TypeMessage: 包含 [SegText, SegImage, SegMention...]
+	// - TypeReaction: 通常包含单个 [SegReaction]
+	// - TypeRevoke: 通常为空，或包含一段说明性的 [SegText]
+	Segments []Segment `json:"segments,omitempty"`
+
+	// RefID 是通用引用 ID，指向被当前事件操作的“目标对象”。
+	// - 消息回复 (TypeMessage + SegReply logic): 指向被回复的 Message ID。
+	// - 消息撤回 (TypeRevoke): 指向被撤回的 Message ID。
+	// - 表情互动 (TypeReaction): 指向被点赞/表态的 Message ID。
+	RefID string `json:"ref_id,omitempty"`
+
+	// Extra 存储特定于平台的额外原始数据。
+	Extra Properties `json:"extra,omitempty"`
 }
 
-// Seg 表示消息的一个内容段
-// 消息可以由多个不同类型的段组成（如文本、图片、提及等）
-type Seg struct {
-	Kind string `json:"kind"` // 段类型（text、image、audio、video、file、mention 等）
-	Raw  Props  `json:"raw"`  // 段的原始数据
+// Reset 重置事件对象的所有字段，以便将其放回 sync.Pool 中复用。
+// 这对于高吞吐量的消息系统至关重要，能显著减少 GC 压力。
+func (e *Event) Reset() {
+	e.ID = ""
+	e.Type = ""
+	e.Time = time.Time{}
+	e.Platform = ""
+	e.RoomID = ""
+	e.Sender = nil
+	e.Segments = e.Segments[:0]
+	e.RefID = ""
+	e.Extra = nil
 }
 
-// Node 表示一个聊天平台中的节点（房间/群组）
-// 用于桥接配置
-type Node struct {
-	Plat string `json:"plat"`          // 平台名称
-	Room string `json:"room"`          // 房间/群组 ID
-	Cfg  Props  `json:"cfg,omitempty"` // 节点特定配置
+// BridgeNode 代表桥接关系中的一个端点（平台+房间）。
+type BridgeNode struct {
+	Platform string     `json:"platform"`
+	RoomID   string     `json:"room_id"`
+	Config   Properties `json:"config,omitempty"`
 }
 
-// Group 表示一个桥接组，连接多个平台的房间
-type Group struct {
-	ID    int64  // 桥接组的数据库 ID
-	Name  string // 桥接组名称
-	Nodes []Node // 包含的节点列表
+// BridgeGroup 代表一组互联的房间（即一个桥接组）。
+type BridgeGroup struct {
+	ID    int64
+	Nodes []BridgeNode
 }
 
-// Info 表示房间或用户的基本信息
-type Info struct {
-	ID     string `json:"id"`               // 房间/用户 ID
-	Name   string `json:"name"`             // 显示名称
-	Avatar string `json:"avatar,omitempty"` // 头像 URL
-	Topic  string `json:"topic,omitempty"`  // 主题/描述
+// RoomInfo 包含从驱动获取的房间基本信息。
+type RoomInfo struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Avatar string `json:"avatar,omitempty"`
+	Topic  string `json:"topic,omitempty"`
 }
 
-// Route 表示平台的路由模式
-type Route string
+// RoutePolicy 定义了驱动的路由策略。
+type RoutePolicy string
 
 const (
-	RouteMirror Route = "mirror" // 镜像模式：为每个桥接创建独立房间
-	RouteMix    Route = "mix"    // 混合模式：所有桥接消息发送到同一房间
+	// PolicyMirror 镜像模式，通常用于一对一同步，会尝试创建对应的镜像房间。
+	PolicyMirror RoutePolicy = "mirror"
+	// PolicyMix 混合模式，通常用于将消息聚合到一个公共房间。
+	PolicyMix RoutePolicy = "mix"
 )
 
-// Driver 定义平台适配器的接口
-// 每个聊天平台需要实现此接口以集成到 Relify
+// SendResult 封装了单个消息片段发送的结果。
+// 因为一条源 Event 可能被拆分为多条目标消息（例如图文分离），或者部分发送失败。
+type SendResult struct {
+	// MsgID 是目标平台生成的消息 ID。
+	MsgID string `json:"msg_id"`
+	// Error 如果发送该部分时出错，则包含具体的错误信息。
+	Error error `json:"error,omitempty"`
+}
+
+// API 定义了驱动程序可以调用的核心功能接口。
+type API interface {
+	// FindMapping 查找源消息 ID 对应的目标平台消息 ID。
+	FindMapping(srcPlatform, srcMsgID, dstPlatform string) (string, bool)
+
+	// Receive 将从驱动接收到的标准化事件提交给核心路由器进行处理。
+	Receive(ctx context.Context, event *Event)
+}
+
+// Driver 接口定义了聊天平台适配器必须实现的方法。
 type Driver interface {
-	// Name 返回平台的唯一名称
-	Name() string
+	// Init 初始化驱动程序。
+	Init(ctx context.Context, api API) (string, RoutePolicy, error)
 
-	// Route 返回平台的路由模式
-	Route() Route
-
-	// Start 启动平台适配器
-	// 参数: ctx - 用于控制生命周期的上下文
-	// 返回: 启动过程中的错误
-	Start(ctx context.Context) error
-
-	// Stop 停止平台适配器
-	// 参数: ctx - 用于控制关闭超时的上下文
-	// 返回: 停止过程中的错误
+	// Stop 停止驱动程序，清理资源。
 	Stop(ctx context.Context) error
 
-	// Send 向指定节点发送事件
-	// 参数:
-	//   - ctx: 上下文
-	//   - node: 目标节点
-	//   - evt: 要发送的事件
-	// 返回:
-	//   - string: 发送后的消息 ID
-	//   - error: 发送过程中的错误
-	Send(ctx context.Context, node *Node, evt *Event) (string, error)
+	// Send 将标准化事件发送到指定的目标节点。
+	// 返回发送结果列表，包含生成的消息 ID 和可能的错误。
+	Send(ctx context.Context, node *BridgeNode, event *Event) ([]SendResult, error)
 
-	// Info 获取房间或用户的信息
-	// 参数:
-	//   - ctx: 上下文
-	//   - room: 房间/用户 ID
-	// 返回:
-	//   - *Info: 房间/用户信息
-	//   - error: 获取过程中的错误
-	Info(ctx context.Context, room string) (*Info, error)
+	// GetUserInfo 获取指定用户的详细信息。
+	GetUserInfo(ctx context.Context, userID string) (*Sender, error)
 
-	// Make 创建新房间
-	// 参数:
-	//   - ctx: 上下文
-	//   - info: 房间信息（可为 nil，用于混合模式）
-	// 返回:
-	//   - string: 创建的房间 ID
-	//   - error: 创建过程中的错误
-	Make(ctx context.Context, info *Info) (string, error)
+	// GetRoomInfo 获取指定房间的信息。
+	GetRoomInfo(ctx context.Context, roomID string) (*RoomInfo, error)
+
+	// CreateRoom 根据提供的信息创建一个新房间或获取适配的现有房间 ID。
+	CreateRoom(ctx context.Context, info *RoomInfo) (string, error)
 }
 
-// Config 表示应用程序的配置
+// Config 定义了应用程序的全局配置结构。
 type Config struct {
-	Level string              `yaml:"level"` // 日志级别
-	Mode  string              `yaml:"mode"`  // 运行模式（hub 或 peer）
-	Hub   string              `yaml:"hub"`   // 中心平台名称（仅在 hub 模式下使用）
-	Plats map[string]PlatConf `yaml:"plats"` // 各平台的配置
+	LogLevel  string                    `yaml:"log_level"`
+	Mode      string                    `yaml:"mode"`
+	Hub       string                    `yaml:"hub"`
+	RetentDay int                       `yaml:"retent_day"`
+	Platforms map[string]PlatformConfig `yaml:"platforms"`
 }
 
-// PlatConf 表示单个平台的配置
-type PlatConf struct {
-	Type    string `yaml:"type"`    // 平台类型
-	Enabled bool   `yaml:"enabled"` // 是否启用
-	Cfg     Props  `yaml:"cfg"`     // 平台特定配置
-}
-
-// GetString 从 Props 中安全地获取字符串值
-// 参数:
-//   - p: 属性映射
-//   - key: 要获取的键
-//
-// 返回:
-//   - string: 键对应的字符串值，如果不存在或类型不匹配则返回空字符串
-func GetString(p Props, key string) string {
-	if v, ok := p[key]; ok {
-		if s, ok := v.(string); ok {
-			return s
-		}
-		return ""
-	}
-	return ""
+// PlatformConfig 定义了单个平台的配置。
+type PlatformConfig struct {
+	Driver  string     `yaml:"driver"`
+	Enabled bool       `yaml:"enabled"`
+	Config  Properties `yaml:"config"`
 }

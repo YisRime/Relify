@@ -4,399 +4,266 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"log/slog"
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite" // SQLite 驱动
+	"github.com/jellydator/ttlcache/v3"
+	_ "modernc.org/sqlite"
 )
 
-// op 定义数据库事务操作函数类型
-type op func(*sql.Tx) error
+// Operation 定义了在数据库事务上下文中执行的函数签名。
+// 所有的写操作都应封装为此类型，以便通过 worker 进行批量处理。
+type Operation func(*sql.Tx) error
 
-// Store 管理应用程序的持久化存储
-// 使用 SQLite 数据库存储桥接配置、消息映射和用户映射
+// Store 负责应用程序的数据持久化存储管理。
+// 它使用 SQLite 作为后端数据库，并实现了以下特性：
+// - 基于通道的异步写操作队列。
+// - 批量事务提交以优化 I/O 性能。
+// - 内存缓存 (TTL Cache) 用于加速热点数据读取。
+// - 启动时的数据预热。
 type Store struct {
-	db    *sql.DB        // 数据库连接
-	cache sync.Map       // 内存缓存，减少数据库查询
-	ops   chan op        // 异步写入队列
-	stop  chan struct{}  // 停止信号
-	wg    sync.WaitGroup // 等待写入协程完成
+	db         *sql.DB
+	cache      *ttlcache.Cache[string, *BridgeGroup]
+	operations chan Operation
+	stopChan   chan struct{}
+	waitGroup  sync.WaitGroup
 }
 
-// NewStore 创建新的存储实例
-// 参数:
-//   - path: SQLite 数据库文件路径
-//
-// 返回:
-//   - *Store: 新的存储实例
-//   - error: 初始化过程中的错误
-func NewStore(path string) (*Store, error) {
-	// 配置 SQLite 连接参数
-	// WAL: 预写式日志模式，提高并发性能
-	// timeout: 锁等待超时时间
-	// NORMAL: 同步模式，平衡性能和安全性
-	dsn := fmt.Sprintf("%s?_journal=WAL&_timeout=5000&_sync=NORMAL", path)
-
-	db, err := sql.Open("sqlite", dsn)
+// NewStore 初始化并返回一个新的 Store 实例。
+// 该函数会执行以下操作：
+// 1. 打开 SQLite 数据库连接并配置 WAL 模式。
+// 2. 创建必要的数据表和索引 (bridges, mappings)。
+// 3. 启动后台 worker 协程用于处理写操作。
+// 4. 启动后台定时任务用于清理过期的消息映射。
+// 5. 执行缓存预热。
+func NewStore(path string, retentionDays int) (*Store, error) {
+	db, err := sql.Open("sqlite", fmt.Sprintf("%s?_journal=WAL&_timeout=5000", path))
 	if err != nil {
 		return nil, err
 	}
 
-	// 创建数据库表结构
-	sqls := []string{
-		// 桥接组表
-		`CREATE TABLE IF NOT EXISTS groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)`,
-		// 绑定表：存储桥接组中的各个节点
-		`CREATE TABLE IF NOT EXISTS binds (bind_id INTEGER, plat TEXT, room TEXT, cfg TEXT, PRIMARY KEY (plat, room))`,
-		`CREATE INDEX IF NOT EXISTS idx_bind_group ON binds(bind_id)`,
-		// 消息映射表：跟踪跨平台的消息对应关系
-		`CREATE TABLE IF NOT EXISTS maps (src_plat TEXT, src_msg TEXT, dst_plat TEXT, dst_msg TEXT, bind_id INTEGER, ts INTEGER, PRIMARY KEY (src_plat, src_msg, dst_plat))`,
-		`CREATE INDEX IF NOT EXISTS idx_map_ts ON maps(ts)`, // 用于过期数据清理
-		// 用户映射表：存储跨平台的用户身份映射
-		`CREATE TABLE IF NOT EXISTS users (src_plat TEXT, src_user TEXT, dst_plat TEXT, dst_user TEXT, PRIMARY KEY (src_plat, src_user, dst_plat))`,
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS bridges (
+			id INTEGER, 
+			platform TEXT, 
+			room_id TEXT, 
+			config TEXT, 
+			PRIMARY KEY (platform, room_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bridge_id ON bridges(id)`,
+		`CREATE TABLE IF NOT EXISTS mappings (
+			src_platform TEXT, 
+			src_msg_id TEXT, 
+			dst_platform TEXT, 
+			dst_msg_id TEXT, 
+			bridge_id INTEGER, 
+			timestamp INTEGER, 
+			PRIMARY KEY (src_platform, src_msg_id, dst_platform, dst_msg_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_mapping_time ON mappings(timestamp)`,
 	}
 
-	// 执行建表语句
-	for _, q := range sqls {
+	for _, q := range queries {
 		if _, err := db.Exec(q); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
 
-	s := &Store{
-		db:   db,
-		ops:  make(chan op, 2000), // 写入队列缓冲区
-		stop: make(chan struct{}),
+	// 初始化泛型缓存
+	cache := ttlcache.New(
+		ttlcache.WithDisableTouchOnHit[string, *BridgeGroup](),
+	)
+
+	store := &Store{
+		db:         db,
+		cache:      cache,
+		operations: make(chan Operation, 2000),
+		stopChan:   make(chan struct{}),
 	}
-	s.wg.Add(1)
 
-	// 启动后台协程
-	go s.writer()  // 批量写入协程
-	go s.cleaner() // 数据清理协程
+	if err := store.preload(); err != nil {
+		slog.Warn("缓存预热失败", "err", err)
+	}
 
-	return s, nil
+	store.waitGroup.Add(1)
+	go store.worker()
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		for range ticker.C {
+			expireTime := time.Now().Add(time.Duration(-retentionDays) * 24 * time.Hour).Unix()
+			store.PushOperation(func(tx *sql.Tx) error {
+				_, err := tx.Exec("DELETE FROM mappings WHERE timestamp < ?", expireTime)
+				return err
+			})
+		}
+	}()
+
+	return store, nil
 }
 
-// Close 关闭存储，等待所有待处理的写入操作完成
-// 返回:
-//   - error: 关闭过程中的错误
-func (s *Store) Close() error {
-	close(s.stop) // 发送停止信号
-	s.wg.Wait()   // 等待写入协程完成
-
-	if err := s.db.Close(); err != nil {
+// preload 从数据库加载所有的桥接配置 (bridges) 并填充到内存缓存中。
+// 这可以减少运行时的数据库查询频率，提高路由匹配速度。
+func (s *Store) preload() error {
+	rows, err := s.db.Query("SELECT id, platform, room_id, config FROM bridges")
+	if err != nil {
 		return err
 	}
+	defer rows.Close()
+
+	tempMap := make(map[int64]*BridgeGroup)
+
+	for rows.Next() {
+		var id int64
+		var p, r, c string
+		if err := rows.Scan(&id, &p, &r, &c); err != nil {
+			continue
+		}
+
+		node := BridgeNode{Platform: p, RoomID: r}
+		if c != "" {
+			json.Unmarshal([]byte(c), &node.Config)
+		}
+
+		if _, ok := tempMap[id]; !ok {
+			tempMap[id] = &BridgeGroup{ID: id}
+		}
+		tempMap[id].Nodes = append(tempMap[id].Nodes, node)
+	}
+
+	for _, group := range tempMap {
+		for _, node := range group.Nodes {
+			s.cache.Set(node.Platform+":"+node.RoomID, group, ttlcache.NoTTL)
+		}
+	}
+	slog.Info("缓存预热完成", "bridge_count", len(tempMap))
 	return nil
 }
 
-// writer 后台批量写入协程
-// 定期批量提交写入操作，提高数据库性能
-func (s *Store) writer() {
-	defer s.wg.Done()
+// Close 优雅地关闭 Store。
+// 它会停止缓存，关闭 worker 通道，等待所有待处理的写操作完成，最后关闭数据库连接。
+func (s *Store) Close() error {
+	s.cache.Stop()
+	close(s.stopChan)
+	s.waitGroup.Wait()
+	return s.db.Close()
+}
 
-	t := time.NewTicker(200 * time.Millisecond) // 每 200ms 批量提交一次
-	defer t.Stop()
+// worker 是一个后台协程，负责从操作队列中提取请求并批量执行。
+// 它会在累积一定数量的操作或达到时间间隔后，在一个数据库事务中提交这些操作。
+func (s *Store) worker() {
+	defer s.waitGroup.Done()
+	batch := make([]Operation, 0, 100)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 
-	batch := make([]op, 0, 100) // 预分配缓冲区
-
-	// exec 执行批量写入
-	exec := func() {
+	executeBatch := func() {
 		if len(batch) == 0 {
 			return
 		}
-
-		tx, err := s.db.Begin() // 开始事务
-		if err != nil {
-			batch = batch[:0] // 重置切片但保留容量
-			return
+		if tx, err := s.db.Begin(); err == nil {
+			for _, op := range batch {
+				if err := op(tx); err != nil {
+					slog.Error("执行事务失败", "err", err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				slog.Error("提交事务失败", "err", err)
+			}
+		} else {
+			slog.Error("开启事务失败", "err", err)
 		}
-
-		// 执行所有批量操作
-		for _, fn := range batch {
-			_ = fn(tx) // 忽略单个操作的错误
-		}
-
-		_ = tx.Commit()   // 提交事务
-		batch = batch[:0] // 重置切片但保留容量
+		batch = batch[:0]
 	}
 
 	for {
 		select {
-		case fn := <-s.ops:
-			// 收到写入操作
-			batch = append(batch, fn)
+		case op := <-s.operations:
+			batch = append(batch, op)
 			if len(batch) >= 100 {
-				exec() // 达到批量大小，立即提交
+				executeBatch()
 			}
-		case <-t.C:
-			// 定时器触发，提交当前批次
-			exec()
-		case <-s.stop:
-			// 收到停止信号，提交剩余操作并退出
-			exec()
+		case <-ticker.C:
+			executeBatch()
+		case <-s.stopChan:
+			executeBatch()
 			return
 		}
 	}
 }
 
-// push 将写入操作添加到队列
-// 如果队列已满，则丢弃操作（非阻塞）
-func (s *Store) push(fn op) {
-	select {
-	case s.ops <- fn:
-	default: // 队列满时不阻塞
-	}
+// PushOperation 将一个数据库写操作添加到异步处理队列中。
+// 该操作是非阻塞的，除非队列已满。
+func (s *Store) PushOperation(op Operation) {
+	s.operations <- op
 }
 
-// Map 保存消息在不同平台间的映射关系
-// 异步写入，不阻塞调用者
-// 参数:
-//   - sPlat: 源平台名称
-//   - sMsg: 源消息 ID
-//   - dPlat: 目标平台名称
-//   - dMsg: 目标消息 ID
-//   - bid: 桥接组 ID
-func (s *Store) Map(sPlat, sMsg, dPlat, dMsg string, bid int64) {
-	s.push(func(tx *sql.Tx) error {
-		_, err := tx.Exec("INSERT OR IGNORE INTO maps (src_plat, src_msg, dst_plat, dst_msg, bind_id, ts) VALUES (?, ?, ?, ?, ?, ?)",
-			sPlat, sMsg, dPlat, dMsg, bid, time.Now().Unix())
-		return err
+// SaveMapping 异步保存源消息 ID 与目标消息 ID 之间的映射关系。
+// 用于后续的消息引用（如回复）或撤回操作。
+func (s *Store) SaveMapping(srcPlat, srcMsgID, dstPlat string, dstMsgIDs []string, bridgeID int64) {
+	if len(dstMsgIDs) == 0 {
+		return
+	}
+	ts := time.Now().Unix()
+	s.PushOperation(func(tx *sql.Tx) error {
+		for _, dstMsgID := range dstMsgIDs {
+			_, _ = tx.Exec(
+				"INSERT OR IGNORE INTO mappings (src_platform, src_msg_id, dst_platform, dst_msg_id, bridge_id, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+				srcPlat, srcMsgID, dstPlat, dstMsgID, bridgeID, ts,
+			)
+		}
+		return nil
 	})
 }
 
-// Seek 查找消息在目标平台的 ID
-// 参数:
-//   - sPlat: 源平台名称
-//   - sMsg: 源消息 ID
-//   - dPlat: 目标平台名称
-//
-// 返回:
-//   - string: 目标平台的消息 ID
-//   - bool: 是否找到映射
-func (s *Store) Seek(sPlat, sMsg, dPlat string) (string, bool) {
-	var dMsg string
-	err := s.db.QueryRow("SELECT dst_msg FROM maps WHERE src_plat=? AND src_msg=? AND dst_plat=?", sPlat, sMsg, dPlat).Scan(&dMsg)
-	return dMsg, err == nil
+// FindMapping 根据源平台、源消息 ID 和目标平台，查找对应的目标消息 ID。
+// 返回目标消息 ID 和一个布尔值（表示是否找到）。
+func (s *Store) FindMapping(srcPlat, srcMsgID, dstPlat string) (string, bool) {
+	var dstMsgID string
+	err := s.db.QueryRow(
+		"SELECT dst_msg_id FROM mappings WHERE src_platform=? AND src_msg_id=? AND dst_platform=? ORDER BY rowid DESC LIMIT 1",
+		srcPlat, srcMsgID, dstPlat,
+	).Scan(&dstMsgID)
+	return dstMsgID, err == nil
 }
 
-// Echo 检查消息是否为回声（由本系统发送到该平台）
-// 用于避免消息循环
-// 参数:
-//   - plat: 平台名称
-//   - msg: 消息 ID
-//
-// 返回:
-//   - bool: 是否为回声消息
-func (s *Store) Echo(plat, msg string) bool {
-	var i int
-	return s.db.QueryRow("SELECT 1 FROM maps WHERE dst_plat=? AND dst_msg=? LIMIT 1", plat, msg).Scan(&i) == nil
+// GetBridge 从缓存中检索指定平台和房间所属的桥接组信息。
+// 如果缓存未命中，返回 nil。
+func (s *Store) GetBridge(platform, roomID string) *BridgeGroup {
+	if item := s.cache.Get(platform + ":" + roomID); item != nil {
+		return item.Value()
+	}
+	return nil
 }
 
-// BindUser 绑定用户在不同平台间的映射关系
-// 参数:
-//   - sPlat: 源平台名称
-//   - sUser: 源用户 ID
-//   - dPlat: 目标平台名称
-//   - dUser: 目标用户 ID
-//
-// 返回:
-//   - error: 绑定过程中的错误
-func (s *Store) BindUser(sPlat, sUser, dPlat, dUser string) error {
-	_, err := s.db.Exec("INSERT OR REPLACE INTO users (src_plat, src_user, dst_plat, dst_user) VALUES (?, ?, ?, ?)", sPlat, sUser, dPlat, dUser)
-	if err == nil {
-		// 清除缓存 - 使用 strings.Builder 构建键
-		var keyBuilder strings.Builder
-		keyBuilder.Grow(len(sPlat) + len(sUser) + len(dPlat) + 4)
-		keyBuilder.WriteString("u:")
-		keyBuilder.WriteString(sPlat)
-		keyBuilder.WriteByte(':')
-		keyBuilder.WriteString(sUser)
-		keyBuilder.WriteByte(':')
-		keyBuilder.WriteString(dPlat)
-		s.cache.Delete(keyBuilder.String())
-	}
-	return err
-}
-
-// FindUser 查找用户在目标平台的 ID
-// 使用缓存加速查询
-// 参数:
-//   - sPlat: 源平台名称
-//   - sUser: 源用户 ID
-//   - dPlat: 目标平台名称
-//
-// 返回:
-//   - string: 目标平台的用户 ID
-//   - bool: 是否找到映射
-func (s *Store) FindUser(sPlat, sUser, dPlat string) (string, bool) {
-	// 使用 strings.Builder 构建缓存键
-	var keyBuilder strings.Builder
-	keyBuilder.Grow(len(sPlat) + len(sUser) + len(dPlat) + 4) // 预分配容量: "u:" + 2个冒号
-	keyBuilder.WriteString("u:")
-	keyBuilder.WriteString(sPlat)
-	keyBuilder.WriteByte(':')
-	keyBuilder.WriteString(sUser)
-	keyBuilder.WriteByte(':')
-	keyBuilder.WriteString(dPlat)
-	k := keyBuilder.String()
-
-	// 先查缓存
-	if v, ok := s.cache.Load(k); ok {
-		return v.(string), true
-	}
-
-	// 查数据库
-	var dUser string
-	err := s.db.QueryRow("SELECT dst_user FROM users WHERE src_plat=? AND src_user=? AND dst_plat=?", sPlat, sUser, dPlat).Scan(&dUser)
-	if err == nil {
-		s.cache.Store(k, dUser) // 写入缓存
-		return dUser, true
-	}
-	return "", false
-}
-
-// TargetRoom 查找源房间在目标平台对应的房间 ID
-// 通过桥接配置查找
-// 参数:
-//   - sPlat: 源平台名称
-//   - sRoom: 源房间 ID
-//   - dPlat: 目标平台名称
-//
-// 返回:
-//   - string: 目标平台的房间 ID
-//   - bool: 是否找到映射
-func (s *Store) TargetRoom(sPlat, sRoom, dPlat string) (string, bool) {
-	query := `
-		SELECT t.room 
-		FROM binds AS s
-		JOIN binds AS t ON s.bind_id = t.bind_id
-		WHERE s.plat = ? AND s.room = ? AND t.plat = ?
-	`
-	var dRoom string
-	err := s.db.QueryRow(query, sPlat, sRoom, dPlat).Scan(&dRoom)
-	return dRoom, err == nil
-}
-
-// Find 查找房间所属的桥接组
-// 使用缓存加速查询
-// 参数:
-//   - plat: 平台名称
-//   - room: 房间 ID
-//
-// 返回:
-//   - []*Group: 桥接组列表（通常只有一个）
-func (s *Store) Find(plat, room string) []*Group {
-	// 使用 strings.Builder 构建缓存键，减少字符串拼接开销
-	var keyBuilder strings.Builder
-	keyBuilder.Grow(len(plat) + len(room) + 1) // 预分配容量
-	keyBuilder.WriteString(plat)
-	keyBuilder.WriteByte(':')
-	keyBuilder.WriteString(room)
-	k := keyBuilder.String()
-
-	// 先查缓存
-	if v, ok := s.cache.Load(k); ok {
-		return v.([]*Group)
-	}
-
-	// 查询桥接组 ID
-	var bid int64
-	err := s.db.QueryRow("SELECT bind_id FROM binds WHERE plat=? AND room=?", plat, room).Scan(&bid)
-	if err != nil {
-		return []*Group{} // 未找到桥接
-	}
-
-	// 获取桥接组名称
-	var name string
-	_ = s.db.QueryRow("SELECT name FROM groups WHERE id=?", bid).Scan(&name)
-
-	// 查询桥接组中的所有节点
-	rows, err := s.db.Query("SELECT plat, room, cfg FROM binds WHERE bind_id=?", bid)
-	if err != nil {
-		return []*Group{}
-	}
-	defer rows.Close()
-
-	g := &Group{
-		ID:    bid,
-		Name:  name,
-		Nodes: make([]Node, 0, 4), // 预分配节点切片，通常桥接不会超过4个平台
-	}
-
-	for rows.Next() {
-		var p, r, cStr string
-		if rows.Scan(&p, &r, &cStr) == nil {
-			node := Node{Plat: p, Room: r}
-			if cStr != "" {
-				_ = json.Unmarshal([]byte(cStr), &node.Cfg) // 反序列化配置
-			}
-			g.Nodes = append(g.Nodes, node)
-		}
-	}
-
-	res := []*Group{g}
-	s.cache.Store(k, res) // 写入缓存
-	return res
-}
-
-// Add 创建新的桥接组
-// 参数:
-//   - name: 桥接组名称
-//   - nodes: 桥接的节点列表
-//
-// 返回:
-//   - *Group: 创建的桥接组
-//   - error: 创建过程中的错误
-func (s *Store) Add(name string, nodes []Node) (*Group, error) {
+// CreateBridge 在数据库中注册一个新的桥接组，并同步更新内存缓存。
+// 该操作在事务中执行，确保数据一致性。
+func (s *Store) CreateBridge(nodes []BridgeNode) (*BridgeGroup, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback() // 如果提交失败则回滚
+	defer tx.Rollback()
 
-	// 插入桥接组
-	res, err := tx.Exec("INSERT INTO groups (name) VALUES (?)", name)
-	if err != nil {
-		return nil, err
-	}
-	bid, err := res.LastInsertId() // 获取自增 ID
-	if err != nil {
-		return nil, err
-	}
+	bridgeID := time.Now().UnixNano()
+	group := &BridgeGroup{ID: bridgeID, Nodes: nodes}
 
-	// 插入所有节点
-	for _, n := range nodes {
-		bs, _ := json.Marshal(n.Cfg) // 序列化配置
-		if _, err := tx.Exec("INSERT INTO binds (bind_id, plat, room, cfg) VALUES (?, ?, ?, ?)", bid, n.Plat, n.Room, string(bs)); err != nil {
+	for _, node := range nodes {
+		bytes, _ := json.Marshal(node.Config)
+		if _, err := tx.Exec("INSERT INTO bridges (id, platform, room_id, config) VALUES (?, ?, ?, ?)", bridgeID, node.Platform, node.RoomID, string(bytes)); err != nil {
 			return nil, err
 		}
-		// 清除节点的缓存 - 使用 strings.Builder
-		var keyBuilder strings.Builder
-		keyBuilder.Grow(len(n.Plat) + len(n.Room) + 1)
-		keyBuilder.WriteString(n.Plat)
-		keyBuilder.WriteByte(':')
-		keyBuilder.WriteString(n.Room)
-		s.cache.Delete(keyBuilder.String())
 	}
 
-	if err := tx.Commit(); err != nil { // 提交事务
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &Group{ID: bid, Name: name, Nodes: nodes}, nil
-}
 
-// cleaner 后台清理协程
-// 定期清理过期的消息映射数据（超过 48 小时）
-func (s *Store) cleaner() {
-	t := time.NewTicker(12 * time.Hour) // 每 12 小时清理一次
-	for range t.C {
-		exp := time.Now().Add(-48 * time.Hour).Unix() // 48 小时前的时间戳
-		s.push(func(tx *sql.Tx) error {
-			_, err := tx.Exec("DELETE FROM maps WHERE ts < ?", exp)
-			return err
-		})
+	for _, node := range nodes {
+		s.cache.Set(node.Platform+":"+node.RoomID, group, ttlcache.NoTTL)
 	}
+
+	return group, nil
 }

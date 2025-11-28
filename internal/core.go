@@ -4,196 +4,155 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"sync"
 )
 
-// Registry 维护所有已注册的平台驱动
+// DriverFactory 定义了用于创建驱动程序实例的工厂函数签名。
+// 它接收配置属性并返回初始化后的 Driver 接口或错误。
+type DriverFactory func(Properties) (Driver, error)
+
+var factories = make(map[string]DriverFactory)
+
+// RegisterDriver 注册一个驱动程序工厂，使其可以通过配置文件按名称加载。
+// 通常在驱动程序的 init 函数中调用。
+func RegisterDriver(name string, f DriverFactory) { factories[name] = f }
+
+// Registry 管理所有已加载的驱动程序实例及其对应的路由策略。
 type Registry struct {
-	m map[string]Driver // 驱动名称到驱动实例的映射
+	drivers map[string]Driver
+	routes  map[string]RoutePolicy
 }
 
-// NewReg 创建新的驱动注册表
-// 返回:
-//   - *Registry: 新的注册表实例
-func NewReg() *Registry {
-	return &Registry{m: make(map[string]Driver)}
+// NewRegistry 创建并初始化一个新的 Registry 实例。
+func NewRegistry() *Registry {
+	return &Registry{
+		drivers: make(map[string]Driver),
+		routes:  make(map[string]RoutePolicy),
+	}
 }
 
-// Add 向注册表添加一个驱动
-// 参数:
-//   - d: 要添加的驱动
-func (r *Registry) Add(d Driver) {
-	r.m[d.Name()] = d
-}
+// Register 将一个已初始化的驱动实例及其名称添加到注册表中。
+func (r *Registry) Register(name string, d Driver) { r.drivers[name] = d }
 
-// Get 从注册表获取指定名称的驱动
-// 参数:
-//   - n: 驱动名称
-//
-// 返回:
-//   - Driver: 驱动实例
-//   - bool: 是否找到该驱动
-func (r *Registry) Get(n string) (Driver, bool) {
-	d, ok := r.m[n]
+// GetDriver 根据名称获取已注册的驱动程序实例。
+// 返回驱动实例和是否存在该驱动的布尔值。
+func (r *Registry) GetDriver(name string) (Driver, bool) {
+	d, ok := r.drivers[name]
 	return d, ok
 }
 
-// All 返回所有已注册的驱动
-// 返回:
-//   - map[string]Driver: 驱动名称到驱动实例的映射
-func (r *Registry) All() map[string]Driver { return r.m }
+// GetRoutePolicy 获取指定驱动名称的路由策略。
+func (r *Registry) GetRoutePolicy(name string) RoutePolicy { return r.routes[name] }
 
-// Core 是应用程序的核心结构
-// 管理配置、路由、驱动注册和数据存储
+// GetAllDrivers 返回包含所有已注册驱动的映射表。
+func (r *Registry) GetAllDrivers() map[string]Driver { return r.drivers }
+
+// Core 是应用程序的核心结构体，负责集成配置、路由器、存储层和驱动管理。
+// 它是整个应用生命周期的控制中心。
 type Core struct {
-	Cfg    *Config   // 应用配置
-	Router *Router   // 消息路由器
-	Reg    *Registry // 驱动注册表
-	Store  *Store    // 数据存储
+	Config   *Config
+	Router   *Router
+	Registry *Registry
+	Store    *Store
 }
 
-// NewCore 创建新的核心实例
-// 参数:
-//   - cfg: 应用配置
-//
-// 返回:
-//   - *Core: 新的核心实例
-//   - error: 初始化过程中的错误
-func NewCore(cfg *Config) (*Core, error) {
-	// 确保数据目录存在
-	os.MkdirAll("data", 0755)
-
-	// 初始化 SQLite 数据库
-	dbPath := filepath.Join("data", "relify.db")
-	slog.Info("初始化数据库", "path", dbPath)
-	s, err := NewStore(dbPath)
+// NewCore 根据提供的配置初始化 Core 实例。
+// 该过程包括：
+// 1. 初始化 SQLite 存储层。
+// 2. 创建驱动注册表。
+// 3. 初始化消息路由器。
+// 4. 根据配置实例化所有启用的驱动程序并注册。
+func NewCore(config *Config) (*Core, error) {
+	store, err := NewStore(filepath.Join("data", "relify.db"), config.RetentDay)
 	if err != nil {
-		return nil, fmt.Errorf("初始化存储: %w", err)
+		return nil, err
 	}
-	slog.Info("数据库初始化完成")
+	registry := NewRegistry()
+	router := NewRouter(config, registry, store)
 
-	// 创建驱动注册表和路由器
-	reg := NewReg()
-	router := NewRouter(cfg, reg, s)
-
-	return &Core{
-		Cfg:    cfg,
-		Router: router,
-		Reg:    reg,
-		Store:  s,
-	}, nil
-}
-
-// Add 向核心添加一个平台驱动
-// 只有在配置中启用的平台才会被添加
-// 参数:
-//   - d: 要添加的驱动
-func (c *Core) Add(d Driver) {
-	if pc, ok := c.Cfg.Plats[d.Name()]; ok && pc.Enabled {
-		c.Reg.Add(d)
-		slog.Debug("驱动已注册", "platform", d.Name(), "route", d.Route())
-	}
-}
-
-// Start 启动所有已注册的平台驱动
-// 参数:
-//   - ctx: 用于控制生命周期的上下文
-//
-// 返回:
-//   - error: 启动过程中的错误
-func (c *Core) Start(ctx context.Context) error {
-	drivers := c.Reg.All()
-	total := len(drivers)
-	if total == 0 {
-		return fmt.Errorf("未注册驱动")
+	core := &Core{
+		Config:   config,
+		Router:   router,
+		Registry: registry,
+		Store:    store,
 	}
 
-	slog.Info("开始启动驱动", "count", total)
-
-	// 并发启动所有驱动以提升启动速度
-	type result struct {
-		name string
-		err  error
-	}
-
-	results := make(chan result, total)
-	var wg sync.WaitGroup
-	wg.Add(total)
-
-	for name, d := range drivers {
-		go func(n string, drv Driver) {
-			defer wg.Done()
-			slog.Debug("启动驱动", "platform", n)
-			results <- result{name: n, err: drv.Start(ctx)}
-		}(name, d)
-	}
-
-	// 等待所有驱动启动完成
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// 收集启动结果
-	successCount := 0
-	for res := range results {
-		if res.err != nil {
-			// 如果是中心平台启动失败，直接返回错误
-			if c.Cfg.Mode == "hub" && c.Cfg.Hub == res.name {
-				slog.Error("中心平台启动失败", "platform", res.name, "error", res.err)
-				return fmt.Errorf("启动中心 %s 失败: %w", res.name, res.err)
+	for name, platConf := range config.Platforms {
+		if platConf.Enabled {
+			if create, ok := factories[platConf.Driver]; ok {
+				if driver, err := create(platConf.Config); err == nil {
+					core.Registry.Register(name, driver)
+				}
 			}
-			// 其他平台启动失败仅记录，不影响整体启动
-			slog.Warn("驱动启动失败", "platform", res.name, "error", res.err)
-		} else {
-			successCount++
-			slog.Info("驱动启动成功", "platform", res.name)
 		}
 	}
 
-	// 至少需要一个平台成功启动
-	if successCount == 0 {
-		return fmt.Errorf("无激活平台")
+	return core, nil
+}
+
+// Start 并发初始化并启动所有已注册的驱动程序。
+// 它会等待所有驱动的 Init 方法执行完毕，聚合结果并输出日志。
+// 如果有驱动初始化失败，将在日志中记录警告，但不会中断其他驱动的启动。
+func (c *Core) Start(ctx context.Context) error {
+	drivers := c.Registry.GetAllDrivers()
+	count := len(drivers)
+
+	type result struct {
+		key    string
+		name   string
+		policy RoutePolicy
+		err    error
+	}
+	resultChan := make(chan result, count)
+
+	for key, drv := range drivers {
+		go func(k string, d Driver) {
+			name, policy, err := d.Init(ctx, c.Router)
+			resultChan <- result{k, name, policy, err}
+		}(key, drv)
 	}
 
-	slog.Info("驱动启动完成", "success", successCount, "total", total)
+	var loaded []string
+	var failed []string
+
+	for i := 0; i < count; i++ {
+		res := <-resultChan
+		if res.err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", res.key, res.err))
+			continue
+		}
+		c.Registry.routes[res.key] = res.policy
+		loaded = append(loaded, fmt.Sprintf("%s(%s)", res.key, res.policy))
+	}
+
+	if len(failed) > 0 {
+		slog.Warn("驱动加载出错", "loaded", loaded, "failed", failed)
+	} else {
+		slog.Info("驱动加载完成", "drivers", loaded)
+	}
+
 	return nil
 }
 
-// Stop 停止所有已注册的平台驱动
-// 使用 WaitGroup 确保所有驱动都完成关闭
-// 参数:
-//   - ctx: 用于控制关闭超时的上下文
-//
-// 返回:
-//   - error: 停止过程中的错误
+// Stop 优雅地停止所有服务。
+// 操作顺序：
+// 1. 并发调用所有驱动的 Stop 方法。
+// 2. 停止路由器的后台缓存清理任务。
+// 3. 关闭存储层（保存数据、关闭 DB 连接）。
 func (c *Core) Stop(ctx context.Context) error {
-	slog.Info("停止所有驱动")
 	var wg sync.WaitGroup
-	// 并发停止所有驱动
-	for name, d := range c.Reg.All() {
+	for _, d := range c.Registry.GetAllDrivers() {
 		wg.Add(1)
-		go func(n string, drv Driver) {
+		go func(drv Driver) {
 			defer wg.Done()
-			slog.Debug("停止驱动", "platform", n)
-			if err := drv.Stop(ctx); err != nil {
-				slog.Warn("驱动停止失败", "platform", n, "error", err)
-			} else {
-				slog.Info("驱动已停止", "platform", n)
-			}
-		}(name, d)
+			drv.Stop(ctx)
+		}(d)
 	}
+	wg.Wait()
 
-	wg.Wait() // 等待所有驱动停止
+	// 关闭路由器的缓存清理任务
+	c.Router.Stop()
 
-	// 关闭数据库连接
-	slog.Debug("关闭数据库连接")
-	if err := c.Store.Close(); err != nil {
-		slog.Error("关闭数据库失败", "error", err)
-		return err
-	}
-	slog.Info("数据库已关闭")
-	return nil
+	return c.Store.Close()
 }
