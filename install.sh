@@ -37,23 +37,24 @@ esac
 # --- 2. 获取版本 ---
 VERSION=$1
 if [ -z "$VERSION" ]; then
-    log_info "正在查询最新版本..."
-    # 使用 GitHub API 获取最新 Release Tag
-    LATEST_URL="https://api.github.com/repos/$REPO/releases/latest"
-    VERSION=$(curl -s $LATEST_URL | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-fi
-
-if [ -z "$VERSION" ]; then
-    log_err "无法获取版本信息，请检查网络或指定版本号。"
-    exit 1
+    VERSION="latest"
+    log_info "将下载最新版本..."
+else
+    log_info "将下载指定版本: $VERSION"
 fi
 
 # 构建文件名 (需与 build.go 生成的一致)
 FILE_NAME="${APP_NAME}-${OS_TYPE}-${ARCH_TYPE}"
-DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/$FILE_NAME"
+
+# 使用 latest 或指定版本构建下载链接
+if [ "$VERSION" == "latest" ]; then
+    DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$FILE_NAME"
+else
+    DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/$FILE_NAME"
+fi
 
 # --- 3. 下载与安装 ---
-log_info "准备安装版本: $VERSION ($OS_TYPE/$ARCH_TYPE)"
+log_info "准备安装 ($OS_TYPE/$ARCH_TYPE)"
 
 # 创建临时文件
 TMP_FILE="/tmp/$FILE_NAME"

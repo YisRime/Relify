@@ -2,6 +2,7 @@ package matrix
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -33,6 +34,12 @@ func (m *Matrix) processEvent(evt *event.Event) {
 		"type", evt.Type,
 		"sender", evt.Sender,
 		"room", evt.RoomID,
+		"raw", func() string {
+			if data, err := json.Marshal(evt); err == nil {
+				return string(data)
+			}
+			return ""
+		}(),
 	)
 
 	// 根据事件类型分发处理
@@ -127,11 +134,21 @@ func (m *Matrix) getMemberInfo(userID id.UserID, roomID id.RoomID) (name, avatar
 	// 从 Matrix 获取成员信息
 	member := m.as.BotIntent().Member(context.Background(), roomID, userID)
 	if member != nil {
+		slog.Debug("Matrix 成功获取成员信息",
+			"user_id", userID,
+			"displayname", member.Displayname,
+			"avatar_url", member.AvatarURL,
+		)
+
 		if member.Displayname != "" {
 			name = member.Displayname // 使用显示名称
 		}
 		if member.AvatarURL != "" {
 			avatar = m.mxcToURL(string(member.AvatarURL)) // 转换头像 URL
+			slog.Debug("Matrix 转换头像URL",
+				"mxc", member.AvatarURL,
+				"http_url", avatar,
+			)
 		}
 
 		// 缓存成员信息
@@ -139,6 +156,12 @@ func (m *Matrix) getMemberInfo(userID id.UserID, roomID id.RoomID) (name, avatar
 			"name":   name,
 			"avatar": avatar,
 		})
+	} else {
+		slog.Warn("Matrix 获取成员信息失败",
+			"user_id", userID,
+			"room_id", roomID,
+			"使用默认值", name,
+		)
 	}
 	return name, avatar
 }
@@ -248,10 +271,24 @@ func stripFallback(s string) string {
 func (m *Matrix) mxcToURL(mxc string) string {
 	if len(mxc) > 6 && mxc[:6] == "mxc://" {
 		uri, err := id.ParseContentURI(mxc)
-		if err == nil {
-			// 构建媒体下载 URL
-			return fmt.Sprintf("https://%s/_matrix/media/v3/download/%s/%s", m.cfg.ServerDomain, uri.Homeserver, uri.FileID)
+		if err != nil {
+			slog.Warn("Matrix 解析MXC URI失败",
+				"mxc", mxc,
+				"error", err,
+			)
+			return mxc
 		}
+		// 构建媒体下载 URL
+		httpURL := fmt.Sprintf("https://%s/_matrix/media/v3/download/%s/%s", m.cfg.ServerDomain, uri.Homeserver, uri.FileID)
+		slog.Debug("Matrix MXC转HTTP URL",
+			"mxc", mxc,
+			"homeserver", uri.Homeserver,
+			"file_id", uri.FileID,
+			"http_url", httpURL,
+			"server_domain", m.cfg.ServerDomain,
+		)
+		return httpURL
 	}
+	slog.Debug("Matrix MXC格式无效，返回原值", "mxc", mxc)
 	return mxc
 }

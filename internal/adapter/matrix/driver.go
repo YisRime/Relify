@@ -98,19 +98,54 @@ func (m *Matrix) Info(ctx context.Context, room string) (*internal.Info, error) 
 	rid := id.RoomID(room)
 	info := &internal.Info{ID: room, Name: room}
 
+	slog.Debug("Matrix 获取房间信息", "room_id", room)
+
 	// 获取房间名称
 	var nameRes struct{ Name string }
-	if err := m.as.BotIntent().StateEvent(ctx, rid, event.StateRoomName, "", &nameRes); err == nil && nameRes.Name != "" {
+	if err := m.as.BotIntent().StateEvent(ctx, rid, event.StateRoomName, "", &nameRes); err != nil {
+		slog.Warn("Matrix 获取房间名称失败",
+			"room_id", room,
+			"error", err,
+		)
+	} else if nameRes.Name != "" {
 		info.Name = nameRes.Name
+		slog.Debug("Matrix 获取房间名称成功",
+			"room_id", room,
+			"name", nameRes.Name,
+		)
+	} else {
+		slog.Debug("Matrix 房间名称为空", "room_id", room)
 	}
 
 	// 获取房间头像
 	var avatarRes struct {
 		Url string `json:"url"`
 	}
-	if err := m.as.BotIntent().StateEvent(ctx, rid, event.StateRoomAvatar, "", &avatarRes); err == nil && avatarRes.Url != "" {
+	if err := m.as.BotIntent().StateEvent(ctx, rid, event.StateRoomAvatar, "", &avatarRes); err != nil {
+		slog.Warn("Matrix 获取房间头像失败",
+			"room_id", room,
+			"error", err,
+		)
+	} else if avatarRes.Url != "" {
+		slog.Debug("Matrix 获取房间头像成功",
+			"room_id", room,
+			"mxc", avatarRes.Url,
+		)
 		info.Avatar = m.mxcToURL(avatarRes.Url) // 转换 mxc:// 为 HTTP URL
+		slog.Debug("Matrix 房间头像URL转换",
+			"room_id", room,
+			"mxc", avatarRes.Url,
+			"http_url", info.Avatar,
+		)
+	} else {
+		slog.Debug("Matrix 房间头像为空", "room_id", room)
 	}
+
+	slog.Debug("Matrix 房间信息获取完成",
+		"room_id", room,
+		"name", info.Name,
+		"avatar", info.Avatar,
+	)
 
 	return info, nil
 }

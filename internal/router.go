@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -97,6 +98,12 @@ func (r *Router) Handle(ctx context.Context, e *Event) error {
 		"user", e.User,
 		"kind", e.Kind,
 		"id", e.ID,
+		"raw", func() string {
+			if data, err := json.Marshal(e); err == nil {
+				return string(data)
+			}
+			return ""
+		}(),
 	)
 
 	// 获取源平台驱动

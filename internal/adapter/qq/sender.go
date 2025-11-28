@@ -26,6 +26,12 @@ func (q *QQ) Send(ctx context.Context, node *internal.Node, evt *internal.Event)
 		"room", node.Room,
 		"kind", evt.Kind,
 		"user", evt.User,
+		"raw", func() string {
+			if data, err := json.Marshal(evt); err == nil {
+				return string(data)
+			}
+			return ""
+		}(),
 	)
 
 	switch evt.Kind {

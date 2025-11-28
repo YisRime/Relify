@@ -170,13 +170,27 @@ func (m *Matrix) stopServe(ctx context.Context) error {
 //   - string: 创建的房间 ID
 //   - error: 创建错误
 func (m *Matrix) createRoom(ctx context.Context, info *internal.Info) (string, error) {
-	slog.Info("Matrix 创建房间", "name", info.Name)
+	slog.Info("Matrix 创建房间",
+		"name", info.Name,
+		"topic", info.Topic,
+		"avatar", info.Avatar,
+	)
 
 	// 根据运行模式设置房间可见性
 	visibility := "private"
 	if m.router != nil && m.router.Mode() == "peer" {
 		visibility = "public" // 对等模式下创建公开房间
 	}
+
+	slog.Debug("Matrix 房间配置",
+		"visibility", visibility,
+		"mode", func() string {
+			if m.router != nil {
+				return m.router.Mode()
+			}
+			return "unknown"
+		}(),
+	)
 
 	req := &mautrix.ReqCreateRoom{
 		Name:            info.Name,
@@ -187,7 +201,12 @@ func (m *Matrix) createRoom(ctx context.Context, info *internal.Info) (string, e
 
 	// 如果提供了头像，设置房间头像
 	if info.Avatar != "" {
-		if err := m.setRoomAvatar(ctx, req, info.Avatar); err == nil {
+		slog.Debug("Matrix 设置房间头像", "avatar_url", info.Avatar)
+		if err := m.setRoomAvatar(ctx, req, info.Avatar); err != nil {
+			slog.Warn("Matrix 设置房间头像失败",
+				"avatar_url", info.Avatar,
+				"error", err,
+			)
 		}
 	}
 
@@ -195,11 +214,19 @@ func (m *Matrix) createRoom(ctx context.Context, info *internal.Info) (string, e
 	safeName := strings.ReplaceAll(strings.ToLower(info.Name), " ", "_")
 	req.RoomAliasName = m.cfg.AppService.Namespace + safeName
 
+	slog.Debug("Matrix 房间别名",
+		"alias", req.RoomAliasName,
+		"namespace", m.cfg.AppService.Namespace,
+	)
+
 	// 尝试创建房间
 	resp, err := m.as.BotIntent().CreateRoom(ctx, req)
 	if err != nil {
 		// 如果别名冲突，去掉别名重试
-		slog.Debug("Matrix 房间别名冲突，重试", "alias", req.RoomAliasName)
+		slog.Debug("Matrix 房间别名冲突，重试",
+			"alias", req.RoomAliasName,
+			"error", err,
+		)
 		req.RoomAliasName = ""
 		resp, err = m.as.BotIntent().CreateRoom(ctx, req)
 		if err != nil {
@@ -215,17 +242,36 @@ func (m *Matrix) createRoom(ctx context.Context, info *internal.Info) (string, e
 
 	// 在中心模式下自动邀请指定用户
 	if m.router != nil && m.router.Mode() == "hub" && m.cfg.AutoInvite != "" {
+		slog.Debug("Matrix 中心模式，准备邀请用户",
+			"room_id", resp.RoomID,
+			"user", m.cfg.AutoInvite,
+		)
+
 		_, err := m.as.BotIntent().InviteUser(ctx, resp.RoomID, &mautrix.ReqInviteUser{
 			UserID: id.UserID(m.cfg.AutoInvite),
 		})
 		if err != nil {
 			slog.Warn("Matrix 邀请用户失败",
+				"room_id", resp.RoomID,
 				"user", m.cfg.AutoInvite,
 				"error", err,
 			)
 		} else {
-			slog.Info("Matrix 已邀请用户", "user", m.cfg.AutoInvite)
+			slog.Info("Matrix 已邀请用户",
+				"room_id", resp.RoomID,
+				"user", m.cfg.AutoInvite,
+			)
 		}
+	} else {
+		slog.Debug("Matrix 跳过用户邀请",
+			"mode", func() string {
+				if m.router != nil {
+					return m.router.Mode()
+				}
+				return "unknown"
+			}(),
+			"auto_invite", m.cfg.AutoInvite,
+		)
 	}
 
 	return resp.RoomID.String(), nil
@@ -240,19 +286,30 @@ func (m *Matrix) createRoom(ctx context.Context, info *internal.Info) (string, e
 // 返回:
 //   - error: 设置错误
 func (m *Matrix) setRoomAvatar(ctx context.Context, req *mautrix.ReqCreateRoom, avatarURL string) error {
+	slog.Debug("Matrix 开始设置房间头像", "avatar_url", avatarURL)
+
 	// 上传头像到 Matrix 媒体仓库
 	mxc, err := m.uploadMedia(ctx, m.as.BotIntent(), avatarURL, "")
 	if err != nil {
+		slog.Error("Matrix 上传房间头像失败",
+			"avatar_url", avatarURL,
+			"error", err,
+		)
 		return err
 	}
 
 	if mxc == "" {
+		slog.Error("Matrix 上传房间头像返回空MXC", "avatar_url", avatarURL)
 		return fmt.Errorf("MXC地址为空")
 	}
 
 	// 解析 MXC URI
 	avatarURI, err := id.ParseContentURI(mxc)
 	if err != nil {
+		slog.Error("Matrix 解析房间头像MXC URI失败",
+			"mxc", mxc,
+			"error", err,
+		)
 		return err
 	}
 
@@ -283,8 +340,15 @@ func (m *Matrix) setRoomAvatar(ctx context.Context, req *mautrix.ReqCreateRoom, 
 //   - string: MXC URI
 //   - error: 上传错误
 func (m *Matrix) uploadMedia(ctx context.Context, intent *appservice.IntentAPI, urlStr, mimeType string) (string, error) {
+	slog.Debug("Matrix 开始上传媒体",
+		"url", urlStr,
+		"mime_type", mimeType,
+		"user_id", intent.UserID,
+	)
+
 	// 如果已经是 MXC URI，直接返回
 	if strings.HasPrefix(urlStr, "mxc://") {
+		slog.Debug("Matrix 媒体已是MXC URI，直接使用", "mxc", urlStr)
 		return urlStr, nil
 	}
 
@@ -294,22 +358,45 @@ func (m *Matrix) uploadMedia(ctx context.Context, intent *appservice.IntentAPI, 
 
 	req, err := http.NewRequestWithContext(downCtx, "GET", urlStr, nil)
 	if err != nil {
+		slog.Error("Matrix 创建下载请求失败",
+			"url", urlStr,
+			"error", err,
+		)
 		return "", err
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		slog.Error("Matrix 下载媒体文件失败",
+			"url", urlStr,
+			"error", err,
+		)
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		slog.Error("Matrix 下载媒体返回错误状态码",
+			"url", urlStr,
+			"status_code", resp.StatusCode,
+			"status", resp.Status,
+		)
 		return "", fmt.Errorf("下载状态码 %d", resp.StatusCode)
 	}
+
+	slog.Debug("Matrix 媒体下载成功",
+		"url", urlStr,
+		"content_length", resp.ContentLength,
+		"content_type", resp.Header.Get("Content-Type"),
+	)
 
 	// 读取文件内容
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
+		slog.Error("Matrix 读取媒体数据失败",
+			"url", urlStr,
+			"error", err,
+		)
 		return "", err
 	}
 
@@ -322,12 +409,31 @@ func (m *Matrix) uploadMedia(ctx context.Context, intent *appservice.IntentAPI, 
 	}
 
 	// 上传到 Matrix 媒体仓库
+	slog.Debug("Matrix 开始上传到媒体仓库",
+		"size", len(data),
+		"mime_type", mimeType,
+		"user_id", intent.UserID,
+	)
+
 	uploadResp, err := intent.UploadBytes(ctx, data, mimeType)
 	if err != nil {
+		slog.Error("Matrix 上传到媒体仓库失败",
+			"url", urlStr,
+			"size", len(data),
+			"mime_type", mimeType,
+			"error", err,
+		)
 		return "", err
 	}
 
-	return string(uploadResp.ContentURI.CUString()), nil
+	mxc := string(uploadResp.ContentURI.CUString())
+	slog.Debug("Matrix 媒体上传成功",
+		"original_url", urlStr,
+		"mxc", mxc,
+		"size", len(data),
+	)
+
+	return mxc, nil
 }
 
 // AppServiceStateStore 扩展的状态存储

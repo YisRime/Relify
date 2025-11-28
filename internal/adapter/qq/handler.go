@@ -72,6 +72,7 @@ func (q *QQ) handleMsg(data []byte) {
 		"post_type", evt.PostType,
 		"msg_type", evt.MsgType,
 		"group_id", evt.GroupID,
+		"raw", string(data),
 	)
 
 	ctx := context.Background()

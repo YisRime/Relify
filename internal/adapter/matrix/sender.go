@@ -2,6 +2,7 @@ package matrix
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log/slog"
@@ -29,6 +30,12 @@ func (m *Matrix) Send(ctx context.Context, node *internal.Node, evt *internal.Ev
 		"room", node.Room,
 		"kind", evt.Kind,
 		"user", evt.User,
+		"raw", func() string {
+			if data, err := json.Marshal(evt); err == nil {
+				return string(data)
+			}
+			return ""
+		}(),
 	)
 
 	switch evt.Kind {
@@ -78,21 +85,78 @@ func (m *Matrix) getGhost(evt *internal.Event) *appservice.IntentAPI {
 //   - evt: 包含用户名称和头像的事件
 func (m *Matrix) updateGhostProfile(intent *appservice.IntentAPI, evt *internal.Event) {
 	ctx := context.Background()
-	intent.EnsureRegistered(ctx) // 确保用户已注册
+
+	slog.Debug("Matrix 开始更新Ghost用户资料",
+		"user_id", intent.UserID,
+		"name", evt.Name,
+		"avatar", evt.Avatar,
+		"platform", evt.Plat,
+		"original_user", evt.User,
+	)
+
+	// 确保用户已注册
+	if err := intent.EnsureRegistered(ctx); err != nil {
+		slog.Error("Matrix Ghost用户注册失败",
+			"user_id", intent.UserID,
+			"error", err,
+		)
+		return
+	}
 
 	// 设置显示名称
 	name := evt.Name
 	if name == "" {
 		name = evt.User // 如果没有昵称，使用用户 ID
 	}
-	intent.SetDisplayName(ctx, name)
+
+	slog.Debug("Matrix 设置显示名称",
+		"user_id", intent.UserID,
+		"name", name,
+	)
+
+	if err := intent.SetDisplayName(ctx, name); err != nil {
+		slog.Error("Matrix 设置显示名称失败",
+			"user_id", intent.UserID,
+			"name", name,
+			"error", err,
+		)
+	}
 
 	// 设置头像（如果有）
 	if evt.Avatar != "" {
 		mxc, err := m.uploadMedia(ctx, intent, evt.Avatar, "image/jpeg")
-		if err == nil && mxc != "" {
-			if avatarURI, err := id.ParseContentURI(mxc); err == nil {
-				intent.SetAvatarURL(ctx, avatarURI)
+		if err != nil {
+			slog.Error("Matrix 上传头像失败",
+				"user_id", intent.UserID,
+				"avatar_url", evt.Avatar,
+				"error", err,
+			)
+		} else if mxc == "" {
+			slog.Warn("Matrix 上传头像返回空MXC",
+				"user_id", intent.UserID,
+				"avatar_url", evt.Avatar,
+			)
+		} else {
+			avatarURI, err := id.ParseContentURI(mxc)
+			if err != nil {
+				slog.Error("Matrix 解析MXC URI失败",
+					"user_id", intent.UserID,
+					"mxc", mxc,
+					"error", err,
+				)
+			} else {
+				slog.Debug("Matrix 设置头像URL",
+					"user_id", intent.UserID,
+					"avatar_uri", avatarURI,
+				)
+
+				if err := intent.SetAvatarURL(ctx, avatarURI); err != nil {
+					slog.Error("Matrix 设置头像URL失败",
+						"user_id", intent.UserID,
+						"avatar_uri", avatarURI,
+						"error", err,
+					)
+				}
 			}
 		}
 	}
